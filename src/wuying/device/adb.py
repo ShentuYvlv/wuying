@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+from pathlib import Path
 
 from wuying.config import DeviceSettings
 from wuying.models import AdbEndpoint
@@ -36,6 +38,11 @@ class AdbClient:
         )
 
     def _run(self, command: list[str], *, timeout: int) -> str:
+        env = os.environ.copy()
+        adb_vendor_keys = self._resolve_adb_vendor_keys()
+        if adb_vendor_keys:
+            env["ADB_VENDOR_KEYS"] = adb_vendor_keys
+
         try:
             completed = subprocess.run(
                 command,
@@ -43,6 +50,7 @@ class AdbClient:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=env,
             )
         except FileNotFoundError as exc:
             raise AdbError(f"adb not found: {self.settings.adb_path}") from exc
@@ -53,3 +61,17 @@ class AdbClient:
                 f"Command failed: {' '.join(command)}\nstdout={stdout}\nstderr={stderr}"
             ) from exc
         return (completed.stdout or completed.stderr or "").strip()
+
+    def _resolve_adb_vendor_keys(self) -> str | None:
+        if self.settings.adb_vendor_keys:
+            return self.settings.adb_vendor_keys
+
+        adb_path = Path(self.settings.adb_path)
+        if not adb_path.is_absolute():
+            adb_path = Path.cwd() / adb_path
+
+        candidate = adb_path.parent / "adbkey"
+        if candidate.exists():
+            return str(candidate.resolve())
+
+        return None

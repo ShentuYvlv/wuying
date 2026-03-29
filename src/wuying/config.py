@@ -92,8 +92,11 @@ class AliyunSettings:
 @dataclass(slots=True)
 class DeviceSettings:
     adb_path: str
+    adb_vendor_keys: str | None
     adb_connect_timeout_seconds: int
     adb_ready_timeout_seconds: int
+    start_adb_via_api: bool
+    manual_adb_endpoint: str | None
 
 
 @dataclass(slots=True)
@@ -141,8 +144,11 @@ class AppSettings:
             ),
             device=DeviceSettings(
                 adb_path=_get_optional("ADB_PATH", "adb"),
+                adb_vendor_keys=_get_optional("ADB_VENDOR_KEYS") or None,
                 adb_connect_timeout_seconds=_get_int("ADB_CONNECT_TIMEOUT_SECONDS", 30),
                 adb_ready_timeout_seconds=_get_int("ADB_READY_TIMEOUT_SECONDS", 120),
+                start_adb_via_api=_get_bool("WUYING_START_ADB_VIA_API", True),
+                manual_adb_endpoint=_get_optional("WUYING_MANUAL_ADB_ENDPOINT") or None,
             ),
             doubao=DoubaoSettings(
                 package_name=_get_optional("DOUBAO_PACKAGE_NAME", "com.larus.nova"),

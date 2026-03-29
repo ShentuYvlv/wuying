@@ -158,7 +158,14 @@ class WuyingApiClient:
     def start_instance_adb(self, instance_id: str) -> None:
         logger.info("Starting ADB for instance %s", instance_id)
         request = self._models.StartInstanceAdbRequest(instance_ids=[instance_id])
-        self.client.start_instance_adb(request)
+        try:
+            self.client.start_instance_adb(request)
+        except Exception as exc:
+            raise WuyingApiError(
+                "Failed to call StartInstanceAdb. If you already enabled ADB in the console, "
+                "set WUYING_START_ADB_VIA_API=false or fill WUYING_MANUAL_ADB_ENDPOINT=host:port "
+                "to bypass the API call."
+            ) from exc
 
     def get_adb_endpoint(self, instance_id: str) -> AdbEndpoint:
         request = self._models.ListInstanceAdbAttributesRequest(instance_ids=[instance_id], max_results=10)
@@ -194,7 +201,16 @@ class WuyingApiClient:
     def ensure_adb_ready(self, instance_id: str, *, timeout_seconds: int) -> AdbEndpoint:
         self.start_instance_if_needed(instance_id, timeout_seconds=timeout_seconds)
         self.attach_key_pair_if_needed(instance_id)
-        self.start_instance_adb(instance_id)
+
+        manual_endpoint = self._parse_manual_adb_endpoint(instance_id)
+        if manual_endpoint is not None:
+            logger.info("Using manual ADB endpoint for %s via %s", instance_id, manual_endpoint.serial)
+            return manual_endpoint
+
+        if self.settings.start_adb_via_api:
+            self.start_instance_adb(instance_id)
+        else:
+            logger.info("Skipping StartInstanceAdb due to WUYING_START_ADB_VIA_API=false")
 
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
@@ -212,3 +228,18 @@ class WuyingApiClient:
     def _extract_first_port(raw: str) -> int:
         head = str(raw).split("/")[0].strip()
         return int(head)
+
+    def _parse_manual_adb_endpoint(self, instance_id: str) -> AdbEndpoint | None:
+        raw = getattr(self.settings, "manual_adb_endpoint", None)
+        if not raw:
+            return None
+        if ":" not in raw:
+            raise WuyingApiError(
+                "WUYING_MANUAL_ADB_ENDPOINT must use host:port format, for example 1.2.3.4:5555"
+            )
+        host, port_text = raw.rsplit(":", 1)
+        try:
+            port = int(port_text)
+        except ValueError as exc:
+            raise WuyingApiError("WUYING_MANUAL_ADB_ENDPOINT port must be an integer.") from exc
+        return AdbEndpoint(instance_id=instance_id, host=host.strip(), port=port, source="manual")
