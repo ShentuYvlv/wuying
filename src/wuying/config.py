@@ -81,8 +81,8 @@ def _parse_selectors(name: str, fallback: list[SelectorSpec]) -> list[SelectorSp
 
 @dataclass(slots=True)
 class AliyunSettings:
-    access_key_id: str
-    access_key_secret: str
+    access_key_id: str | None
+    access_key_secret: str | None
     region_id: str
     endpoint: str
     key_pair_id: str | None
@@ -122,6 +122,15 @@ class AppSettings:
         region_id = _get_optional("WUYING_REGION_ID", "cn-shanghai")
         explicit_endpoint = _get_optional("WUYING_ENDPOINT")
         aliyun_endpoint = _resolve_wuying_endpoint(region_id, explicit_endpoint)
+        manual_adb_endpoint = _get_optional("WUYING_MANUAL_ADB_ENDPOINT") or None
+        access_key_id = _get_optional("ALIBABA_CLOUD_ACCESS_KEY_ID") or None
+        access_key_secret = _get_optional("ALIBABA_CLOUD_ACCESS_KEY_SECRET") or None
+
+        if not manual_adb_endpoint:
+            if not access_key_id:
+                raise ValueError("Missing required environment variable: ALIBABA_CLOUD_ACCESS_KEY_ID")
+            if not access_key_secret:
+                raise ValueError("Missing required environment variable: ALIBABA_CLOUD_ACCESS_KEY_SECRET")
 
         input_defaults = [
             SelectorSpec(text_contains="问点什么"),
@@ -135,8 +144,8 @@ class AppSettings:
 
         return cls(
             aliyun=AliyunSettings(
-                access_key_id=_get_required("ALIBABA_CLOUD_ACCESS_KEY_ID"),
-                access_key_secret=_get_required("ALIBABA_CLOUD_ACCESS_KEY_SECRET"),
+                access_key_id=access_key_id,
+                access_key_secret=access_key_secret,
                 region_id=region_id,
                 endpoint=aliyun_endpoint,
                 key_pair_id=_get_optional("WUYING_KEY_PAIR_ID") or None,
@@ -148,7 +157,7 @@ class AppSettings:
                 adb_connect_timeout_seconds=_get_int("ADB_CONNECT_TIMEOUT_SECONDS", 30),
                 adb_ready_timeout_seconds=_get_int("ADB_READY_TIMEOUT_SECONDS", 120),
                 start_adb_via_api=_get_bool("WUYING_START_ADB_VIA_API", True),
-                manual_adb_endpoint=_get_optional("WUYING_MANUAL_ADB_ENDPOINT") or None,
+                manual_adb_endpoint=manual_adb_endpoint,
             ),
             doubao=DoubaoSettings(
                 package_name=_get_optional("DOUBAO_PACKAGE_NAME", "com.larus.nova"),

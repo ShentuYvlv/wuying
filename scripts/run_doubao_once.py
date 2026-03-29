@@ -25,6 +25,17 @@ def main() -> int:
     configure_logging()
     settings = AppSettings.from_env()
     instance_id = args.instance_id or _pick_default_instance(settings)
+    print(
+        json.dumps(
+            {
+                "instance_id": instance_id,
+                "manual_adb_endpoint": settings.device.manual_adb_endpoint,
+                "adb_path": settings.device.adb_path,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
     workflow = DoubaoWorkflow(settings)
     result = workflow.run_once(instance_id=instance_id, prompt=args.prompt)

@@ -31,6 +31,12 @@ class WuyingApiClient:
 
     @cached_property
     def client(self) -> Any:
+        if not self.settings.access_key_id or not self.settings.access_key_secret:
+            raise WuyingApiError(
+                "Alibaba Cloud AccessKey is not configured. This is fine in manual ADB mode, "
+                "but API-driven operations require ALIBABA_CLOUD_ACCESS_KEY_ID and "
+                "ALIBABA_CLOUD_ACCESS_KEY_SECRET."
+            )
         try:
             from alibabacloud_eds_aic20230930.client import Client as EDSAICClient
             from alibabacloud_tea_openapi import models as open_api_models
@@ -199,13 +205,13 @@ class WuyingApiClient:
         raise WuyingApiError(f"ADB endpoint fields are empty for instance {instance_id}.")
 
     def ensure_adb_ready(self, instance_id: str, *, timeout_seconds: int) -> AdbEndpoint:
-        self.start_instance_if_needed(instance_id, timeout_seconds=timeout_seconds)
-        self.attach_key_pair_if_needed(instance_id)
-
         manual_endpoint = self._parse_manual_adb_endpoint(instance_id)
         if manual_endpoint is not None:
             logger.info("Using manual ADB endpoint for %s via %s", instance_id, manual_endpoint.serial)
             return manual_endpoint
+
+        self.start_instance_if_needed(instance_id, timeout_seconds=timeout_seconds)
+        self.attach_key_pair_if_needed(instance_id)
 
         if self.settings.start_adb_via_api:
             self.start_instance_adb(instance_id)

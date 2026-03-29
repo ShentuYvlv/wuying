@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+from functools import cached_property
 from datetime import UTC, datetime
 from pathlib import Path
 
 from wuying.aliyun_api import WuyingApiClient
 from wuying.config import AppSettings
 from wuying.device import AdbClient, U2Driver
-from wuying.models import DoubaoRunResult
+from wuying.models import AdbEndpoint, DoubaoRunResult
 
 logger = logging.getLogger(__name__)
 
@@ -16,15 +17,15 @@ logger = logging.getLogger(__name__)
 class DoubaoWorkflow:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
-        self.api = WuyingApiClient(settings.aliyun)
         self.adb = AdbClient(settings.device)
+
+    @cached_property
+    def api(self) -> WuyingApiClient:
+        return WuyingApiClient(self.settings.aliyun)
 
     def run_once(self, *, instance_id: str, prompt: str) -> DoubaoRunResult:
         started_at = datetime.now(tz=UTC)
-        endpoint = self.api.ensure_adb_ready(
-            instance_id,
-            timeout_seconds=self.settings.device.adb_ready_timeout_seconds,
-        )
+        endpoint = self._resolve_endpoint(instance_id)
         serial = self.adb.connect(endpoint)
         self.adb.wait_for_device(serial, timeout_seconds=self.settings.device.adb_ready_timeout_seconds)
 
@@ -86,3 +87,23 @@ class DoubaoWorkflow:
         output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         logger.info("Saved result to %s", output_path)
         return output_path
+
+    def _resolve_endpoint(self, instance_id: str) -> AdbEndpoint:
+        raw = self.settings.device.manual_adb_endpoint
+        if raw:
+            if ":" not in raw:
+                raise ValueError(
+                    "WUYING_MANUAL_ADB_ENDPOINT must use host:port format, for example 1.2.3.4:5555"
+                )
+            host, port_text = raw.rsplit(":", 1)
+            try:
+                port = int(port_text)
+            except ValueError as exc:
+                raise ValueError("WUYING_MANUAL_ADB_ENDPOINT port must be an integer.") from exc
+            logger.info("Using manual ADB endpoint for %s via %s", instance_id, raw)
+            return AdbEndpoint(instance_id=instance_id, host=host.strip(), port=port, source="manual")
+
+        return self.api.ensure_adb_ready(
+            instance_id,
+            timeout_seconds=self.settings.device.adb_ready_timeout_seconds,
+        )
