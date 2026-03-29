@@ -30,6 +30,17 @@ class U2Driver:
     def wake(self) -> None:
         self.device.screen_on()
 
+    def current_package(self) -> str:
+        try:
+            current = self.device.app_current()
+        except Exception as exc:
+            raise U2DriverError("Failed to read current foreground app.") from exc
+
+        if not isinstance(current, dict):
+            return ""
+        package = current.get("package")
+        return package.strip() if isinstance(package, str) else ""
+
     def start_app(self, package_name: str, activity: str | None = None) -> None:
         if activity:
             self.device.app_start(package_name, activity=activity, wait=True)

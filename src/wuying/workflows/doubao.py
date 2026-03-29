@@ -31,10 +31,8 @@ class DoubaoWorkflow:
 
         driver = U2Driver(serial)
         driver.wake()
-        driver.start_app(
-            self.settings.doubao.package_name,
-            self.settings.doubao.launch_activity,
-        )
+        self._ensure_doubao_foreground(driver)
+        self._ensure_new_chat_session(driver)
         self._ensure_chat_input_ready(driver)
         driver.set_text(self.settings.doubao.selectors.input_selectors, prompt, timeout_seconds=30)
         driver.click(self.settings.doubao.selectors.send_selectors, timeout_seconds=30)
@@ -134,3 +132,37 @@ class DoubaoWorkflow:
                 "Doubao opened, but the text input is still not visible. Adjust "
                 "DOUBAO_SWITCH_TO_TEXT_INPUT_SELECTORS_JSON or DOUBAO_INPUT_SELECTORS_JSON."
             ) from exc
+
+    def _ensure_doubao_foreground(self, driver: U2Driver) -> None:
+        current_package = driver.current_package()
+        if current_package == self.settings.doubao.package_name:
+            return
+
+        logger.info(
+            "Current foreground package is %s, launching %s",
+            current_package or "<unknown>",
+            self.settings.doubao.package_name,
+        )
+        driver.start_app(
+            self.settings.doubao.package_name,
+            self.settings.doubao.launch_activity,
+        )
+
+    def _ensure_new_chat_session(self, driver: U2Driver) -> None:
+        if self._is_chat_page(driver):
+            back = driver.find_first(self.settings.doubao.selectors.chat_back_selectors)
+            if back is not None:
+                back.click()
+
+        new_chat = driver.find_first(self.settings.doubao.selectors.new_chat_selectors)
+        if new_chat is not None:
+            new_chat.click()
+
+    def _is_chat_page(self, driver: U2Driver) -> bool:
+        if driver.find_first(self.settings.doubao.selectors.chat_back_selectors) is not None:
+            return True
+        if driver.find_first(self.settings.doubao.selectors.switch_to_text_input_selectors) is not None:
+            return True
+        if driver.find_first(self.settings.doubao.selectors.input_selectors) is not None:
+            return True
+        return False

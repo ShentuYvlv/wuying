@@ -61,6 +61,8 @@ class SelectorSpec:
 
 @dataclass(slots=True)
 class DoubaoSelectors:
+    new_chat_selectors: list[SelectorSpec]
+    chat_back_selectors: list[SelectorSpec]
     enter_chat_selectors: list[SelectorSpec]
     switch_to_text_input_selectors: list[SelectorSpec]
     input_selectors: list[SelectorSpec]

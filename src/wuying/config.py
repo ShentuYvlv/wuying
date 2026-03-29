@@ -142,6 +142,14 @@ class AppSettings:
             SelectorSpec(text="聊聊新话题"),
             SelectorSpec(text="豆包"),
         ]
+        new_chat_defaults = [
+            SelectorSpec(resource_id="com.larus.nova:id/right_img", description_contains="创建新对话"),
+            SelectorSpec(text="聊聊新话题"),
+        ]
+        chat_back_defaults = [
+            SelectorSpec(resource_id="com.larus.nova:id/back_icon", description="返回"),
+            SelectorSpec(resource_id="com.larus.nova:id/back_icon"),
+        ]
         switch_to_text_input_defaults = [
             SelectorSpec(resource_id="com.larus.nova:id/action_input", description="文本输入"),
             SelectorSpec(resource_id="com.larus.nova:id/action_input"),
@@ -176,6 +184,14 @@ class AppSettings:
                 response_settle_seconds=_get_int("DOUBAO_RESPONSE_SETTLE_SECONDS", 4),
                 output_dir=Path(_get_optional("DOUBAO_OUTPUT_DIR", "data/runs")),
                 selectors=DoubaoSelectors(
+                    new_chat_selectors=_parse_selectors(
+                        "DOUBAO_NEW_CHAT_SELECTORS_JSON",
+                        new_chat_defaults,
+                    ),
+                    chat_back_selectors=_parse_selectors(
+                        "DOUBAO_CHAT_BACK_SELECTORS_JSON",
+                        chat_back_defaults,
+                    ),
                     enter_chat_selectors=_parse_selectors(
                         "DOUBAO_ENTER_CHAT_SELECTORS_JSON",
                         enter_chat_defaults,
