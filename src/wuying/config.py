@@ -137,6 +137,16 @@ class AppSettings:
             SelectorSpec(description_contains="问点什么"),
             SelectorSpec(class_name="android.widget.EditText"),
         ]
+        enter_chat_defaults = [
+            SelectorSpec(resource_id="com.larus.nova:id/right_img", description_contains="创建新对话"),
+            SelectorSpec(text="聊聊新话题"),
+            SelectorSpec(text="豆包"),
+        ]
+        switch_to_text_input_defaults = [
+            SelectorSpec(resource_id="com.larus.nova:id/action_input", description="文本输入"),
+            SelectorSpec(resource_id="com.larus.nova:id/action_input"),
+            SelectorSpec(text="按住说话"),
+        ]
         send_defaults = [
             SelectorSpec(description="发送"),
             SelectorSpec(text="发送"),
@@ -166,6 +176,14 @@ class AppSettings:
                 response_settle_seconds=_get_int("DOUBAO_RESPONSE_SETTLE_SECONDS", 4),
                 output_dir=Path(_get_optional("DOUBAO_OUTPUT_DIR", "data/runs")),
                 selectors=DoubaoSelectors(
+                    enter_chat_selectors=_parse_selectors(
+                        "DOUBAO_ENTER_CHAT_SELECTORS_JSON",
+                        enter_chat_defaults,
+                    ),
+                    switch_to_text_input_selectors=_parse_selectors(
+                        "DOUBAO_SWITCH_TO_TEXT_INPUT_SELECTORS_JSON",
+                        switch_to_text_input_defaults,
+                    ),
                     input_selectors=_parse_selectors("DOUBAO_INPUT_SELECTORS_JSON", input_defaults),
                     send_selectors=_parse_selectors("DOUBAO_SEND_SELECTORS_JSON", send_defaults),
                     response_selectors=_parse_selectors("DOUBAO_RESPONSE_SELECTORS_JSON", []),

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from wuying.aliyun_api import WuyingApiClient
 from wuying.config import AppSettings
-from wuying.device import AdbClient, U2Driver
+from wuying.device import AdbClient, U2Driver, U2DriverError
 from wuying.models import AdbEndpoint, DoubaoRunResult
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,7 @@ class DoubaoWorkflow:
             self.settings.doubao.package_name,
             self.settings.doubao.launch_activity,
         )
+        self._ensure_chat_input_ready(driver)
         driver.set_text(self.settings.doubao.selectors.input_selectors, prompt, timeout_seconds=30)
         driver.click(self.settings.doubao.selectors.send_selectors, timeout_seconds=30)
         response = driver.wait_for_new_response(
@@ -107,3 +108,29 @@ class DoubaoWorkflow:
             instance_id,
             timeout_seconds=self.settings.device.adb_ready_timeout_seconds,
         )
+
+    def _ensure_chat_input_ready(self, driver: U2Driver) -> None:
+        if driver.find_first(self.settings.doubao.selectors.input_selectors) is not None:
+            return
+
+        entry = driver.find_first(self.settings.doubao.selectors.enter_chat_selectors)
+        if entry is not None:
+            entry.click()
+
+        try:
+            driver.wait_for_any(self.settings.doubao.selectors.input_selectors, timeout_seconds=15)
+            return
+        except U2DriverError:
+            pass
+
+        switch_input = driver.find_first(self.settings.doubao.selectors.switch_to_text_input_selectors)
+        if switch_input is not None:
+            switch_input.click()
+
+        try:
+            driver.wait_for_any(self.settings.doubao.selectors.input_selectors, timeout_seconds=15)
+        except U2DriverError as exc:
+            raise U2DriverError(
+                "Doubao opened, but the text input is still not visible. Adjust "
+                "DOUBAO_SWITCH_TO_TEXT_INPUT_SELECTORS_JSON or DOUBAO_INPUT_SELECTORS_JSON."
+            ) from exc
