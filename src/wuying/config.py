@@ -155,6 +155,14 @@ class AppSettings:
             SelectorSpec(resource_id="com.larus.nova:id/action_input"),
             SelectorSpec(text="按住说话"),
         ]
+        reference_expand_defaults = [
+            SelectorSpec(resource_id="com.larus.nova:id/ll_reference_title"),
+            SelectorSpec(resource_id="com.larus.nova:id/tv_reference_title"),
+            SelectorSpec(text_contains="关键词"),
+            SelectorSpec(text_contains="资料"),
+            SelectorSpec(description_contains="关键词"),
+            SelectorSpec(description_contains="资料"),
+        ]
         send_defaults = [
             SelectorSpec(description="发送"),
             SelectorSpec(text="发送"),
@@ -199,6 +207,10 @@ class AppSettings:
                     switch_to_text_input_selectors=_parse_selectors(
                         "DOUBAO_SWITCH_TO_TEXT_INPUT_SELECTORS_JSON",
                         switch_to_text_input_defaults,
+                    ),
+                    reference_expand_selectors=_parse_selectors(
+                        "DOUBAO_REFERENCE_EXPAND_SELECTORS_JSON",
+                        reference_expand_defaults,
                     ),
                     input_selectors=_parse_selectors("DOUBAO_INPUT_SELECTORS_JSON", input_defaults),
                     send_selectors=_parse_selectors("DOUBAO_SEND_SELECTORS_JSON", send_defaults),

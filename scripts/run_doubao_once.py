@@ -17,6 +17,9 @@ from wuying.workflows import DoubaoWorkflow
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
     parser = argparse.ArgumentParser(description="Run one Doubao task on a single Wuying cloud phone instance.")
     parser.add_argument("--instance-id", help="Override one instance ID from .env")
     parser.add_argument("--prompt", required=True, help="Prompt sent to Doubao")

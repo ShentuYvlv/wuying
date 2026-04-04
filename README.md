@@ -1,3 +1,25 @@
+
+## 启动
+
+先手工确认 ADB 已连接：
+
+.\platform-tools\adb.exe connect 106.14.114.146:100
+.\platform-tools\adb.exe devices -l
+
+
+再运行脚本：
+
+
+python .\scripts\run_doubao_once.py --prompt "你好，介绍一下你自己"
+
+
+多实例同 prompt：
+
+
+python .\scripts\run_doubao_many.py --prompt "你好，介绍一下你自己" --max-workers 3
+
+
+
 # 无影云手机豆包自动化
 
 基于阿里云无影云手机、ADB 和 `uiautomator2` 的豆包专用自动化脚本。
@@ -72,26 +94,6 @@ DOUBAO_PACKAGE_NAME=com.larus.nova
 - `WUYING_MANUAL_ADB_ENDPOINT` 填控制台给出的 ADB 地址
 - `WUYING_INSTANCE_IDS` 现在只用于结果标识
 - `DOUBAO_PACKAGE_NAME` 必须改成真实包名
-
-## 启动
-
-先手工确认 ADB 已连接：
-
-```powershell
-.\platform-tools\adb.exe connect 106.14.114.146:100
-.\platform-tools\adb.exe devices -l
-```
-
-再运行脚本：
-
-
-python .\scripts\run_doubao_once.py --prompt "你好，介绍一下你自己"
-
-
-多实例同 prompt：
-
-
-python .\scripts\run_doubao_many.py --prompt "你好，介绍一下你自己" --max-workers 3
 
 
 # 判断逻辑

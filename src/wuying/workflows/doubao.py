@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import time
+import xml.etree.ElementTree as ET
 from functools import cached_property
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +18,13 @@ logger = logging.getLogger(__name__)
 
 
 class DoubaoWorkflow:
+    REFERENCE_TITLE_RESOURCE_ID = "com.larus.nova:id/tv_reference_title"
+    REFERENCE_WRAPPER_RESOURCE_ID = "com.larus.nova:id/ll_reference_title"
+    REFERENCE_PANEL_RESOURCE_ID = "com.larus.nova:id/subview_container"
+    REFERENCE_KEYWORD_CONTAINER_RESOURCE_ID = "com.larus.nova:id/sub_keyword_reference"
+    REFERENCE_INDEX_RESOURCE_ID = "com.larus.nova:id/tv_reference_index"
+    REFERENCE_CONTENT_RESOURCE_ID = "com.larus.nova:id/tv_reference_content"
+
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
         self.adb = AdbClient(settings.device)
@@ -36,17 +46,32 @@ class DoubaoWorkflow:
         self._ensure_chat_input_ready(driver)
         driver.set_text(self.settings.doubao.selectors.input_selectors, prompt, timeout_seconds=30)
         driver.click(self.settings.doubao.selectors.send_selectors, timeout_seconds=30)
+        response_started_at = time.perf_counter()
         response = driver.wait_for_new_response(
             prompt=prompt,
             timeout_seconds=self.settings.doubao.response_timeout_seconds,
             settle_seconds=self.settings.doubao.response_settle_seconds,
             response_selectors=self.settings.doubao.selectors.response_selectors,
         )
+        response_elapsed = time.perf_counter() - response_started_at
+
+        reference_started_at = time.perf_counter()
+        search_summary, reference_keywords, reference_titles = self._collect_reference_metadata(driver)
+        reference_elapsed = time.perf_counter() - reference_started_at
+        logger.info(
+            "Doubao timings: response=%.2fs, references=%.2fs, titles=%s",
+            response_elapsed,
+            reference_elapsed,
+            len(reference_titles),
+        )
         finished_at = datetime.now(tz=UTC)
         output_path = self._write_result(
             instance_id=instance_id,
             prompt=prompt,
             response=response,
+            search_summary=search_summary,
+            reference_keywords=reference_keywords,
+            reference_titles=reference_titles,
             adb_serial=serial,
             started_at=started_at,
             finished_at=finished_at,
@@ -55,6 +80,9 @@ class DoubaoWorkflow:
             instance_id=instance_id,
             prompt=prompt,
             response=response,
+            search_summary=search_summary,
+            reference_keywords=reference_keywords,
+            reference_titles=reference_titles,
             adb_serial=serial,
             output_path=output_path,
             started_at=started_at,
@@ -67,6 +95,9 @@ class DoubaoWorkflow:
         instance_id: str,
         prompt: str,
         response: str,
+        search_summary: str | None,
+        reference_keywords: list[str],
+        reference_titles: list[str],
         adb_serial: str,
         started_at: datetime,
         finished_at: datetime,
@@ -80,6 +111,9 @@ class DoubaoWorkflow:
             "adb_serial": adb_serial,
             "prompt": prompt,
             "response": response,
+            "search_summary": search_summary,
+            "reference_keywords": reference_keywords,
+            "reference_titles": reference_titles,
             "started_at": started_at.isoformat(),
             "finished_at": finished_at.isoformat(),
         }
@@ -166,3 +200,277 @@ class DoubaoWorkflow:
         if driver.find_first(self.settings.doubao.selectors.input_selectors) is not None:
             return True
         return False
+
+    def _extract_reference_metadata(self, visible_texts: list[str]) -> tuple[str | None, list[str], list[str]]:
+        normalized = [self._normalize_visible_text(item) for item in visible_texts]
+        summary_index = -1
+        search_summary: str | None = None
+
+        for index, line in enumerate(normalized):
+            if self._looks_like_search_summary(line):
+                search_summary = line
+                summary_index = index
+                break
+
+        if search_summary is None:
+            return None, [], []
+
+        reference_keywords: list[str] = []
+        reference_titles: list[str] = []
+        pending_number: str | None = None
+
+        for line in normalized[summary_index + 1 :]:
+            if not line:
+                continue
+
+            if self._looks_like_search_summary(line):
+                continue
+
+            keywords = self._extract_quoted_keywords(line)
+            if keywords:
+                for keyword in keywords:
+                    if keyword not in reference_keywords:
+                        reference_keywords.append(keyword)
+                continue
+
+            combined_match = re.match(r"^(\d+)[.、]\s*(.+)$", line)
+            if combined_match:
+                title = combined_match.group(2).strip()
+                if title and title not in reference_titles:
+                    reference_titles.append(title)
+                pending_number = None
+                continue
+
+            standalone_number = re.match(r"^(\d+)[.、]?$", line)
+            if standalone_number:
+                pending_number = standalone_number.group(1)
+                continue
+
+            if pending_number is not None:
+                if line not in reference_titles:
+                    reference_titles.append(line)
+                pending_number = None
+
+        return search_summary, reference_keywords, reference_titles
+
+    def _collect_reference_metadata(self, driver: U2Driver) -> tuple[str | None, list[str], list[str]]:
+        visible_texts = driver.dump_message_text_nodes(include_content_desc=True)
+        search_summary, reference_keywords, reference_titles = self._extract_reference_metadata(visible_texts)
+
+        expand = driver.find_first(self.settings.doubao.selectors.reference_expand_selectors)
+        if expand is None:
+            return search_summary, reference_keywords, reference_titles
+
+        expand.click()
+        time.sleep(0.05)
+
+        latest_summary = search_summary
+        latest_keywords = list(reference_keywords)
+        latest_title_map: dict[int, str] = {}
+        expected_reference_count = self._extract_reference_count(search_summary)
+        stable_rounds = 0
+        max_rounds = self._reference_scan_rounds(expected_reference_count)
+        last_max_index = 0
+
+        for _ in range(max_rounds):
+            root = driver.dump_hierarchy_root()
+            page_summary, page_keywords, page_title_map, panel_bounds = self._extract_reference_panel_state(root)
+            if page_summary and not latest_summary:
+                latest_summary = page_summary
+                expected_reference_count = self._extract_reference_count(latest_summary)
+
+            swipe_bounds = panel_bounds or self._extract_message_list_bounds(root)
+
+            added_count = 0
+            added_count += self._extend_unique(latest_keywords, page_keywords)
+            added_count += self._merge_reference_title_map(latest_title_map, page_title_map)
+            current_max_index = max(page_title_map.keys(), default=0)
+
+            if expected_reference_count is not None and len(latest_title_map) >= expected_reference_count:
+                break
+            if expected_reference_count is not None and current_max_index >= expected_reference_count:
+                break
+            if added_count == 0 and current_max_index <= last_max_index:
+                stable_rounds += 1
+            else:
+                stable_rounds = 0
+
+            if stable_rounds >= 3:
+                break
+
+            last_max_index = max(last_max_index, current_max_index)
+            if swipe_bounds is None:
+                break
+
+            start_x, start_y, end_x, end_y = self._build_swipe_points(
+                swipe_bounds,
+                x_ratio=0.26,
+                start_ratio=0.89,
+                end_ratio=0.33,
+            )
+            self.adb.input_swipe(
+                driver.serial,
+                start_x=start_x,
+                start_y=start_y,
+                end_x=end_x,
+                end_y=end_y,
+                duration_ms=300,
+            )
+            time.sleep(0.15)
+
+        latest_titles = [title for _, title in sorted(latest_title_map.items())]
+        return latest_summary, latest_keywords, latest_titles
+
+    @staticmethod
+    def _normalize_visible_text(value: str) -> str:
+        return re.sub(r"\s+", " ", value).strip()
+
+    @staticmethod
+    def _looks_like_search_summary(value: str) -> bool:
+        return bool(re.search(r"搜索\s*\d+\s*个关键词.*参考\s*\d+\s*篇资料", value))
+
+    @staticmethod
+    def _extract_quoted_keywords(value: str) -> list[str]:
+        matches = re.findall(r"[“\"]([^”\"]+)[”\"]", value)
+        return [item.strip() for item in matches if item.strip()]
+
+    def _extract_reference_titles_from_visible_texts(self, visible_texts: list[str]) -> list[str]:
+        normalized = [self._normalize_visible_text(item) for item in visible_texts]
+        reference_titles: list[str] = []
+        pending_number: str | None = None
+
+        for line in normalized:
+            if not line:
+                continue
+
+            combined_match = re.match(r"^(\d+)[.、]\s*(.+)$", line)
+            if combined_match:
+                title = combined_match.group(2).strip()
+                if title and title not in reference_titles:
+                    reference_titles.append(title)
+                pending_number = None
+                continue
+
+            standalone_number = re.match(r"^(\d+)[.、]?$", line)
+            if standalone_number:
+                pending_number = standalone_number.group(1)
+                continue
+
+            if pending_number is not None:
+                if line not in reference_titles:
+                    reference_titles.append(line)
+                pending_number = None
+
+        return reference_titles
+
+    def _extract_reference_panel_state(
+        self,
+        root: ET.Element,
+    ) -> tuple[str | None, list[str], dict[int, str], tuple[int, int, int, int] | None]:
+        summary = None
+        title_node = self._find_node_by_resource_id(root, self.REFERENCE_TITLE_RESOURCE_ID)
+        if title_node is not None:
+            summary = self._normalize_visible_text(title_node.attrib.get("text", ""))
+
+        panel_node = self._find_node_by_resource_id(root, self.REFERENCE_PANEL_RESOURCE_ID)
+        panel_bounds = None
+        if panel_node is not None:
+            panel_bounds = U2Driver._parse_bounds(panel_node.attrib.get("bounds", ""))
+
+        keyword_container = self._find_node_by_resource_id(root, self.REFERENCE_KEYWORD_CONTAINER_RESOURCE_ID)
+        keywords: list[str] = []
+        if keyword_container is not None:
+            for node in keyword_container.iter("node"):
+                text = self._normalize_visible_text(node.attrib.get("text", ""))
+                resource_id = node.attrib.get("resource-id", "")
+                if not text or resource_id in {
+                    self.REFERENCE_TITLE_RESOURCE_ID,
+                    self.REFERENCE_INDEX_RESOURCE_ID,
+                    self.REFERENCE_CONTENT_RESOURCE_ID,
+                }:
+                    continue
+                for keyword in self._extract_quoted_keywords(text):
+                    if keyword not in keywords:
+                        keywords.append(keyword)
+
+        title_map: dict[int, str] = {}
+        for node in root.iter("node"):
+            if node.attrib.get("resource-id") != "com.larus.nova:id/ll_source_item":
+                continue
+            item_index: int | None = None
+            item_title: str | None = None
+            for child in node.iter("node"):
+                resource_id = child.attrib.get("resource-id", "")
+                text = self._normalize_visible_text(child.attrib.get("text", ""))
+                if not text:
+                    continue
+                if resource_id == self.REFERENCE_INDEX_RESOURCE_ID:
+                    match = re.match(r"^(\d+)", text)
+                    if match:
+                        item_index = int(match.group(1))
+                elif resource_id == self.REFERENCE_CONTENT_RESOURCE_ID:
+                    item_title = text
+            if item_index is not None and item_title:
+                title_map[item_index] = item_title
+
+        return summary, keywords, title_map, panel_bounds
+
+    def _extract_message_list_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
+        node = self._find_node_by_resource_id(root, U2Driver.MESSAGE_LIST_RESOURCE_ID)
+        if node is None:
+            return None
+        return U2Driver._parse_bounds(node.attrib.get("bounds", ""))
+
+    @staticmethod
+    def _build_swipe_points(
+        bounds: tuple[int, int, int, int],
+        *,
+        x_ratio: float,
+        start_ratio: float,
+        end_ratio: float,
+    ) -> tuple[int, int, int, int]:
+        left, top, right, bottom = bounds
+        x = int(left + (right - left) * x_ratio)
+        start_y = int(top + (bottom - top) * start_ratio)
+        end_y = int(top + (bottom - top) * end_ratio)
+        return x, start_y, x, end_y
+
+    @staticmethod
+    def _extract_reference_count(search_summary: str | None) -> int | None:
+        if not search_summary:
+            return None
+        match = re.search(r"参考\s*(\d+)\s*篇资料", search_summary)
+        if not match:
+            return None
+        return int(match.group(1))
+
+    @staticmethod
+    def _extend_unique(target: list[str], new_items: list[str]) -> int:
+        added = 0
+        for item in new_items:
+            if item and item not in target:
+                target.append(item)
+                added += 1
+        return added
+
+    @staticmethod
+    def _reference_scan_rounds(expected_reference_count: int | None) -> int:
+        if expected_reference_count is None:
+            return 10
+        return max(8, min(16, (expected_reference_count // 8) + 4))
+
+    @staticmethod
+    def _find_node_by_resource_id(root: ET.Element, resource_id: str) -> ET.Element | None:
+        for node in root.iter("node"):
+            if node.attrib.get("resource-id") == resource_id:
+                return node
+        return None
+
+    @staticmethod
+    def _merge_reference_title_map(target: dict[int, str], new_items: dict[int, str]) -> int:
+        added = 0
+        for index, title in new_items.items():
+            if index not in target and title:
+                target[index] = title
+                added += 1
+        return added

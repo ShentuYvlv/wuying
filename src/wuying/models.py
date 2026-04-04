@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -65,6 +65,7 @@ class DoubaoSelectors:
     chat_back_selectors: list[SelectorSpec]
     enter_chat_selectors: list[SelectorSpec]
     switch_to_text_input_selectors: list[SelectorSpec]
+    reference_expand_selectors: list[SelectorSpec]
     input_selectors: list[SelectorSpec]
     send_selectors: list[SelectorSpec]
     response_selectors: list[SelectorSpec]
@@ -75,10 +76,13 @@ class DoubaoRunResult:
     instance_id: str
     prompt: str
     response: str
+    search_summary: str | None
     adb_serial: str
     output_path: str
     started_at: str
     finished_at: str
+    reference_keywords: list[str] = field(default_factory=list)
+    reference_titles: list[str] = field(default_factory=list)
 
     @classmethod
     def build(
@@ -87,6 +91,9 @@ class DoubaoRunResult:
         instance_id: str,
         prompt: str,
         response: str,
+        search_summary: str | None,
+        reference_keywords: list[str],
+        reference_titles: list[str],
         adb_serial: str,
         output_path: Path,
         started_at: datetime,
@@ -96,6 +103,9 @@ class DoubaoRunResult:
             instance_id=instance_id,
             prompt=prompt,
             response=response,
+            search_summary=search_summary,
+            reference_keywords=reference_keywords,
+            reference_titles=reference_titles,
             adb_serial=adb_serial,
             output_path=str(output_path),
             started_at=started_at.astimezone(UTC).isoformat(),

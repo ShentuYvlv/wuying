@@ -31,6 +31,29 @@ class AdbClient:
     def shell(self, serial: str, *parts: str, timeout: int = 30) -> str:
         return self._run([self.settings.adb_path, "-s", serial, "shell", *parts], timeout=timeout)
 
+    def input_swipe(
+        self,
+        serial: str,
+        *,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        duration_ms: int = 80,
+        timeout: int = 10,
+    ) -> str:
+        return self.shell(
+            serial,
+            "input",
+            "swipe",
+            str(start_x),
+            str(start_y),
+            str(end_x),
+            str(end_y),
+            str(duration_ms),
+            timeout=timeout,
+        )
+
     def wait_for_device(self, serial: str, *, timeout_seconds: int) -> None:
         self._run(
             [self.settings.adb_path, "-s", serial, "wait-for-device"],

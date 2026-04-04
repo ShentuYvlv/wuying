@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 import xml.etree.ElementTree as ET
 from typing import Any
@@ -15,6 +16,10 @@ class U2DriverError(RuntimeError):
 
 
 class U2Driver:
+    MESSAGE_LIST_RESOURCE_ID = "com.larus.nova:id/message_list"
+    FIND_POLL_INTERVAL_SECONDS = 0.2
+    RESPONSE_POLL_INTERVAL_SECONDS = 0.35
+
     def __init__(self, serial: str) -> None:
         self.serial = serial
         self.device = self._connect(serial)
@@ -53,7 +58,7 @@ class U2Driver:
             found = self.find_first(selectors)
             if found is not None:
                 return found
-            time.sleep(1)
+            time.sleep(self.FIND_POLL_INTERVAL_SECONDS)
         joined = "; ".join(selector.describe() for selector in selectors)
         raise U2DriverError(f"Timed out waiting for selectors: {joined}")
 
@@ -84,19 +89,124 @@ class U2Driver:
         target = self.wait_for_any(selectors, timeout_seconds)
         target.click()
 
-    def dump_text_nodes(self) -> list[str]:
+    def swipe_up(self, start_ratio: float = 0.82, end_ratio: float = 0.28, x_ratio: float = 0.5) -> None:
+        try:
+            width, height = self.device.window_size()
+        except Exception as exc:
+            raise U2DriverError("Failed to read device window size for swipe.") from exc
+
+        start_x = int(width * x_ratio)
+        end_x = start_x
+        start_y = int(height * start_ratio)
+        end_y = int(height * end_ratio)
+        self.device.swipe(start_x, start_y, end_x, end_y, 0.15)
+
+    def swipe_up_in_message_list_fast(self) -> None:
+        try:
+            width, height = self.device.window_size()
+        except Exception as exc:
+            raise U2DriverError("Failed to read device window size for swipe.") from exc
+
+        x = width // 2
+        start_y = int(height * 0.74)
+        end_y = int(height * 0.42)
+        self.device.swipe(x, start_y, x, end_y, 0.10)
+
+    def swipe_up_in_bounds(
+        self,
+        bounds: tuple[int, int, int, int],
+        *,
+        start_ratio: float = 0.86,
+        end_ratio: float = 0.34,
+        duration: float = 0.10,
+    ) -> None:
+        left, top, right, bottom = bounds
+        x = (left + right) // 2
+        start_y = int(top + (bottom - top) * start_ratio)
+        end_y = int(top + (bottom - top) * end_ratio)
+        self.device.swipe(x, start_y, x, end_y, duration)
+
+    def swipe_up_in_best_container(self) -> None:
         hierarchy = self.device.dump_hierarchy()
         try:
             root = ET.fromstring(hierarchy)
         except ET.ParseError as exc:
             raise U2DriverError("Failed to parse UI hierarchy dump.") from exc
 
+        candidate: tuple[int, tuple[int, int, int, int]] | None = None
+        for node in root.iter("node"):
+            attrs = node.attrib
+            cls = attrs.get("class", "")
+            resource_id = attrs.get("resource-id", "")
+            scrollable = attrs.get("scrollable", "false") == "true"
+            is_list_like = (
+                scrollable
+                or "RecyclerView" in cls
+                or "ScrollView" in cls
+                or "ListView" in cls
+            )
+            if not is_list_like:
+                continue
+            if resource_id.endswith(":id/action_bar"):
+                continue
+
+            bounds = self._parse_bounds(attrs.get("bounds", ""))
+            if bounds is None:
+                continue
+            left, top, right, bottom = bounds
+            width = right - left
+            height = bottom - top
+            if width <= 0 or height <= 150:
+                continue
+
+            area = width * height
+            if candidate is None or area > candidate[0]:
+                candidate = (area, bounds)
+
+        if candidate is None:
+            self.swipe_up()
+            return
+
+        _, (left, top, right, bottom) = candidate
+        x = (left + right) // 2
+        start_y = int(top + (bottom - top) * 0.82)
+        end_y = int(top + (bottom - top) * 0.22)
+        self.device.swipe(x, start_y, x, end_y, 0.2)
+
+    def dump_text_nodes(
+        self,
+        *,
+        include_content_desc: bool = True,
+        root_resource_id: str | None = None,
+    ) -> list[str]:
+        root = self.dump_hierarchy_root()
+        walk_root = self._find_node_by_resource_id(root, root_resource_id) if root_resource_id else root
+        if walk_root is None:
+            return []
+
         texts: list[str] = []
-        for node in root.iter():
-            text = (node.attrib.get("text") or "").strip()
-            if text:
-                texts.append(text)
+        seen: set[str] = set()
+        attrs = ("text", "content-desc") if include_content_desc else ("text",)
+        for node in walk_root.iter():
+            for attr in attrs:
+                value = (node.attrib.get(attr) or "").strip()
+                if value and value not in seen:
+                    texts.append(value)
+                    seen.add(value)
         return texts
+
+    def dump_message_text_nodes(self, *, include_content_desc: bool = False) -> list[str]:
+        return self.dump_text_nodes(
+            include_content_desc=include_content_desc,
+            root_resource_id=self.MESSAGE_LIST_RESOURCE_ID,
+        )
+
+    def dump_hierarchy_root(self) -> ET.Element:
+        hierarchy = self.device.dump_hierarchy()
+        try:
+            return ET.fromstring(hierarchy)
+        except ET.ParseError as exc:
+            raise U2DriverError("Failed to parse UI hierarchy dump.") from exc
 
     def wait_for_new_response(
         self,
@@ -106,7 +216,7 @@ class U2Driver:
         settle_seconds: int,
         response_selectors: list[SelectorSpec] | None = None,
     ) -> str:
-        baseline = self.dump_text_nodes()
+        baseline = self.dump_message_text_nodes(include_content_desc=False)
         logger.info("Captured %s baseline text nodes", len(baseline))
 
         deadline = time.monotonic() + timeout_seconds
@@ -118,14 +228,14 @@ class U2Driver:
                 response_obj = self.find_first(response_selectors)
                 if response_obj is not None:
                     text = self._safe_text(response_obj)
-                    if text and text != prompt:
+                    if text and text != prompt and not self._looks_like_loading_response(text):
                         if text != last_candidate:
                             last_candidate = text
                             last_change_ts = time.monotonic()
                         if time.monotonic() - last_change_ts >= settle_seconds:
                             return last_candidate
 
-            current = self.dump_text_nodes()
+            current = self.dump_message_text_nodes(include_content_desc=False)
             candidate = self._pick_response_candidate(baseline=baseline, current=current, prompt=prompt)
             if candidate:
                 if candidate != last_candidate:
@@ -134,7 +244,7 @@ class U2Driver:
                 if time.monotonic() - last_change_ts >= settle_seconds:
                     return last_candidate
 
-            time.sleep(1)
+            time.sleep(self.RESPONSE_POLL_INTERVAL_SECONDS)
 
         raise U2DriverError("Timed out waiting for Doubao response.")
 
@@ -144,7 +254,10 @@ class U2Driver:
         candidates = [
             item
             for item in current
-            if item not in baseline_set and item.strip() and item.strip() != prompt.strip()
+            if item not in baseline_set
+            and item.strip()
+            and item.strip() != prompt.strip()
+            and not U2Driver._looks_like_loading_response(item)
         ]
         if not candidates:
             return ""
@@ -162,3 +275,34 @@ class U2Driver:
             if isinstance(result, str) and result.strip():
                 return result.strip()
         return ""
+
+    @staticmethod
+    def _parse_bounds(value: str) -> tuple[int, int, int, int] | None:
+        match = re.match(r"^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$", value.strip())
+        if not match:
+            return None
+        return tuple(int(group) for group in match.groups())  # type: ignore[return-value]
+
+    @staticmethod
+    def _find_node_by_resource_id(root: ET.Element, resource_id: str | None) -> ET.Element | None:
+        if not resource_id:
+            return root
+        for node in root.iter("node"):
+            if node.attrib.get("resource-id") == resource_id:
+                return node
+        return None
+
+    @staticmethod
+    def _looks_like_loading_response(value: str) -> bool:
+        text = value.strip()
+        if not text:
+            return False
+        if re.search(r"找到\s*\d+\s*篇资料", text):
+            return True
+        if re.search(r"搜索\s*\d+\s*个关键词.*参考\s*\d+\s*篇资料", text):
+            return True
+        if "⚫" in text or "..." in text or "……" in text:
+            first_line = text.splitlines()[0].strip()
+            if re.search(r"找到\s*\d+\s*篇资料", first_line):
+                return True
+        return False
