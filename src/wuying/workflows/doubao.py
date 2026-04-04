@@ -270,9 +270,10 @@ class DoubaoWorkflow:
         expected_reference_count = self._extract_reference_count(search_summary)
         stable_rounds = 0
         max_rounds = self._reference_scan_rounds(expected_reference_count)
+        quick_swipe_plans = self._reference_quick_swipe_plans(expected_reference_count)
         last_max_index = 0
 
-        for _ in range(max_rounds):
+        for round_index in range(max_rounds):
             root = driver.dump_hierarchy_root()
             page_summary, page_keywords, page_title_map, panel_bounds = self._extract_reference_panel_state(root)
             if page_summary and not latest_summary:
@@ -302,11 +303,16 @@ class DoubaoWorkflow:
             if swipe_bounds is None:
                 break
 
+            if round_index < len(quick_swipe_plans):
+                x_ratio, start_ratio, end_ratio, duration_ms, settle_seconds = quick_swipe_plans[round_index]
+            else:
+                x_ratio, start_ratio, end_ratio, duration_ms, settle_seconds = (0.26, 0.89, 0.33, 300, 0.15)
+
             start_x, start_y, end_x, end_y = self._build_swipe_points(
                 swipe_bounds,
-                x_ratio=0.26,
-                start_ratio=0.89,
-                end_ratio=0.33,
+                x_ratio=x_ratio,
+                start_ratio=start_ratio,
+                end_ratio=end_ratio,
             )
             self.adb.input_swipe(
                 driver.serial,
@@ -314,9 +320,9 @@ class DoubaoWorkflow:
                 start_y=start_y,
                 end_x=end_x,
                 end_y=end_y,
-                duration_ms=300,
+                duration_ms=duration_ms,
             )
-            time.sleep(0.15)
+            time.sleep(settle_seconds)
 
         latest_titles = [title for _, title in sorted(latest_title_map.items())]
         return latest_summary, latest_keywords, latest_titles
@@ -458,6 +464,17 @@ class DoubaoWorkflow:
         if expected_reference_count is None:
             return 10
         return max(8, min(16, (expected_reference_count // 8) + 4))
+
+    @staticmethod
+    def _reference_quick_swipe_plans(
+        expected_reference_count: int | None,
+    ) -> list[tuple[float, float, float, int, float]]:
+        plans: list[tuple[float, float, float, int, float]] = [
+            (0.26, 0.89, 0.33, 300, 0.15),
+        ]
+        if expected_reference_count is not None and expected_reference_count > 12:
+            plans.append((0.26, 0.95, 0.10, 450, 0.18))
+        return plans
 
     @staticmethod
     def _find_node_by_resource_id(root: ET.Element, resource_id: str) -> ET.Element | None:
