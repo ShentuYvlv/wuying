@@ -60,7 +60,7 @@ class SelectorSpec:
 
 
 @dataclass(slots=True)
-class DoubaoSelectors:
+class ChatAppSelectors:
     new_chat_selectors: list[SelectorSpec]
     chat_back_selectors: list[SelectorSpec]
     enter_chat_selectors: list[SelectorSpec]
@@ -72,42 +72,57 @@ class DoubaoSelectors:
 
 
 @dataclass(slots=True)
-class DoubaoRunResult:
+class PlatformRunResult:
+    platform: str
     instance_id: str
     prompt: str
     response: str
-    search_summary: str | None
     adb_serial: str
     output_path: str
     started_at: str
     finished_at: str
-    reference_keywords: list[str] = field(default_factory=list)
-    reference_titles: list[str] = field(default_factory=list)
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "platform": self.platform,
+            "instance_id": self.instance_id,
+            "prompt": self.prompt,
+            "response": self.response,
+            "adb_serial": self.adb_serial,
+            "output_path": self.output_path,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+        }
+        payload.update(self.extra)
+        return payload
 
     @classmethod
     def build(
         cls,
         *,
+        platform: str,
         instance_id: str,
         prompt: str,
         response: str,
-        search_summary: str | None,
-        reference_keywords: list[str],
-        reference_titles: list[str],
         adb_serial: str,
         output_path: Path,
         started_at: datetime,
         finished_at: datetime,
-    ) -> "DoubaoRunResult":
+        extra: dict[str, Any] | None = None,
+    ) -> "PlatformRunResult":
         return cls(
+            platform=platform,
             instance_id=instance_id,
             prompt=prompt,
             response=response,
-            search_summary=search_summary,
-            reference_keywords=reference_keywords,
-            reference_titles=reference_titles,
             adb_serial=adb_serial,
             output_path=str(output_path),
             started_at=started_at.astimezone(UTC).isoformat(),
             finished_at=finished_at.astimezone(UTC).isoformat(),
+            extra=extra or {},
         )
+
+
+DoubaoSelectors = ChatAppSelectors
+DoubaoRunResult = PlatformRunResult

@@ -5,6 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
+*.apk
 
 a_Scraping_ChatGPT_Web_main/memory
 # Sensitive runtime session/auth files

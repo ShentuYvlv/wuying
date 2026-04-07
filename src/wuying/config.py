@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from wuying.models import DoubaoSelectors, SelectorSpec
+from wuying.models import ChatAppSelectors, SelectorSpec
 
 
 def _load_dotenv_if_present() -> None:
@@ -100,20 +100,21 @@ class DeviceSettings:
 
 
 @dataclass(slots=True)
-class DoubaoSettings:
+class ChatAppSettings:
+    platform_name: str
     package_name: str
     launch_activity: str | None
     response_timeout_seconds: int
     response_settle_seconds: int
     output_dir: Path
-    selectors: DoubaoSelectors
+    selectors: ChatAppSelectors
 
 
 @dataclass(slots=True)
 class AppSettings:
     aliyun: AliyunSettings
     device: DeviceSettings
-    doubao: DoubaoSettings
+    doubao: ChatAppSettings
     instance_ids: list[str]
 
     @classmethod
@@ -185,13 +186,14 @@ class AppSettings:
                 start_adb_via_api=_get_bool("WUYING_START_ADB_VIA_API", True),
                 manual_adb_endpoint=manual_adb_endpoint,
             ),
-            doubao=DoubaoSettings(
+            doubao=ChatAppSettings(
+                platform_name="doubao",
                 package_name=_get_optional("DOUBAO_PACKAGE_NAME", "com.larus.nova"),
                 launch_activity=_get_optional("DOUBAO_LAUNCH_ACTIVITY") or None,
                 response_timeout_seconds=_get_int("DOUBAO_RESPONSE_TIMEOUT_SECONDS", 120),
                 response_settle_seconds=_get_int("DOUBAO_RESPONSE_SETTLE_SECONDS", 4),
                 output_dir=Path(_get_optional("DOUBAO_OUTPUT_DIR", "data/runs")),
-                selectors=DoubaoSelectors(
+                selectors=ChatAppSelectors(
                     new_chat_selectors=_parse_selectors(
                         "DOUBAO_NEW_CHAT_SELECTORS_JSON",
                         new_chat_defaults,
