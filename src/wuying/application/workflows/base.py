@@ -39,12 +39,13 @@ class ChatAppWorkflow(ABC):
         self._ensure_new_chat_session(driver)
         self._ensure_chat_input_ready(driver)
         driver.set_text(self.app.selectors.input_selectors, prompt, timeout_seconds=30)
-        driver.click(self.app.selectors.send_selectors, timeout_seconds=30)
+        self._send_prompt(driver, prompt=prompt)
 
         response = driver.wait_for_new_response(
             prompt=prompt,
             timeout_seconds=self.app.response_timeout_seconds,
             settle_seconds=self.app.response_settle_seconds,
+            message_root_resource_id=self.app.message_list_resource_id,
             response_selectors=self.app.selectors.response_selectors,
         )
         extra = self._collect_extra_metadata(driver, prompt=prompt, response=response)
@@ -149,6 +150,9 @@ class ChatAppWorkflow(ABC):
         if driver.find_first(self.app.selectors.input_selectors) is not None:
             return True
         return False
+
+    def _send_prompt(self, driver: U2Driver, *, prompt: str) -> None:
+        driver.click(self.app.selectors.send_selectors, timeout_seconds=30)
 
     @abstractmethod
     def _collect_extra_metadata(self, driver: U2Driver, *, prompt: str, response: str) -> dict[str, object]:

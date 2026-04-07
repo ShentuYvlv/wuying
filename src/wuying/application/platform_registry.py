@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from wuying.application.workflows.base import ChatAppWorkflow
+from wuying.application.workflows.deepseek import DeepseekWorkflow
 from wuying.application.workflows.doubao import DoubaoWorkflow
 from wuying.config import AppSettings
 
@@ -18,7 +19,12 @@ PLATFORM_REGISTRY: dict[str, PlatformDefinition] = {
     "doubao": PlatformDefinition(
         name="doubao",
         workflow_class=DoubaoWorkflow,
-        description="豆包 App 自动化",
+        description="Doubao app automation",
+    ),
+    "deepseek": PlatformDefinition(
+        name="deepseek",
+        workflow_class=DeepseekWorkflow,
+        description="DeepSeek app automation",
     ),
 }
 

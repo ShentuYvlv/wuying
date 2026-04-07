@@ -214,9 +214,13 @@ class U2Driver:
         prompt: str,
         timeout_seconds: int,
         settle_seconds: int,
+        message_root_resource_id: str | None = None,
         response_selectors: list[SelectorSpec] | None = None,
     ) -> str:
-        baseline = self.dump_message_text_nodes(include_content_desc=False)
+        baseline = self.dump_text_nodes(
+            include_content_desc=False,
+            root_resource_id=message_root_resource_id,
+        )
         logger.info("Captured %s baseline text nodes", len(baseline))
 
         deadline = time.monotonic() + timeout_seconds
@@ -235,7 +239,10 @@ class U2Driver:
                         if time.monotonic() - last_change_ts >= settle_seconds:
                             return last_candidate
 
-            current = self.dump_message_text_nodes(include_content_desc=False)
+            current = self.dump_text_nodes(
+                include_content_desc=False,
+                root_resource_id=message_root_resource_id,
+            )
             candidate = self._pick_response_candidate(baseline=baseline, current=current, prompt=prompt)
             if candidate:
                 if candidate != last_candidate:

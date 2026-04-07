@@ -54,6 +54,23 @@ class AdbClient:
             timeout=timeout,
         )
 
+    def input_tap(
+        self,
+        serial: str,
+        *,
+        x: int,
+        y: int,
+        timeout: int = 10,
+    ) -> str:
+        return self.shell(
+            serial,
+            "input",
+            "tap",
+            str(x),
+            str(y),
+            timeout=timeout,
+        )
+
     def wait_for_device(self, serial: str, *, timeout_seconds: int) -> None:
         self._run(
             [self.settings.adb_path, "-s", serial, "wait-for-device"],
