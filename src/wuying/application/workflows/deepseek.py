@@ -39,7 +39,7 @@ class DeepseekWorkflow(ChatAppWorkflow):
         self._ensure_search_only_mode(driver)
 
     def _collect_extra_metadata(self, driver: U2Driver, *, prompt: str, response: str) -> dict[str, object]:
-        return {}
+        return self._build_references_payload()
 
     def _click_new_chat_button(self, driver: U2Driver) -> bool:
         button = driver.find_first(self.app.selectors.new_chat_selectors)

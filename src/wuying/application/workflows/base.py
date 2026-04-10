@@ -154,6 +154,85 @@ class ChatAppWorkflow(ABC):
     def _send_prompt(self, driver: U2Driver, *, prompt: str) -> None:
         driver.click(self.app.selectors.send_selectors, timeout_seconds=30)
 
+    @staticmethod
+    def _build_references_payload(
+        *,
+        summary: str | None = None,
+        keywords: list[str] | None = None,
+        items: list[dict[str, object]] | list[str] | None = None,
+    ) -> dict[str, object]:
+        normalized_summary = summary.strip() if isinstance(summary, str) and summary.strip() else None
+        normalized_keywords = [
+            item.strip()
+            for item in (keywords or [])
+            if isinstance(item, str) and item.strip()
+        ]
+        normalized_items: list[dict[str, object]] = []
+
+        for index, raw in enumerate(items or [], start=1):
+            if isinstance(raw, str):
+                title = raw.strip()
+                if not title:
+                    continue
+                normalized_items.append(
+                    {
+                        "index": index,
+                        "title": title,
+                        "source": None,
+                        "published_at": None,
+                        "url": None,
+                    }
+                )
+                continue
+
+            if not isinstance(raw, dict):
+                continue
+
+            item_index = raw.get("index")
+            if not isinstance(item_index, int):
+                item_index = index
+
+            title = raw.get("title")
+            source = raw.get("source")
+            published_at = raw.get("published_at")
+            url = raw.get("url")
+
+            if isinstance(title, str):
+                title = title.strip() or None
+            else:
+                title = None
+            if isinstance(source, str):
+                source = source.strip() or None
+            else:
+                source = None
+            if isinstance(published_at, str):
+                published_at = published_at.strip() or None
+            else:
+                published_at = None
+            if isinstance(url, str):
+                url = url.strip() or None
+            else:
+                url = None
+
+            if title or source or published_at or url:
+                normalized_items.append(
+                    {
+                        "index": item_index,
+                        "title": title,
+                        "source": source,
+                        "published_at": published_at,
+                        "url": url,
+                    }
+                )
+
+        return {
+            "references": {
+                "summary": normalized_summary,
+                "keywords": normalized_keywords,
+                "items": normalized_items,
+            }
+        }
+
     @abstractmethod
     def _collect_extra_metadata(self, driver: U2Driver, *, prompt: str, response: str) -> dict[str, object]:
         raise NotImplementedError

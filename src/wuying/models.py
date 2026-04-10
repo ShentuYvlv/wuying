@@ -72,6 +72,48 @@ class ChatAppSelectors:
 
 
 @dataclass(slots=True)
+class ReferenceItem:
+    title: str | None = None
+    source: str | None = None
+    published_at: str | None = None
+    url: str | None = None
+    index: int | None = None
+
+    @classmethod
+    def from_mapping(cls, data: dict[str, Any]) -> "ReferenceItem":
+        return cls(
+            title=data.get("title"),
+            source=data.get("source"),
+            published_at=data.get("published_at") or data.get("publishedAt"),
+            url=data.get("url"),
+            index=data.get("index"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "index": self.index,
+            "title": self.title,
+            "source": self.source,
+            "published_at": self.published_at,
+            "url": self.url,
+        }
+
+
+@dataclass(slots=True)
+class ReferenceData:
+    summary: str | None = None
+    keywords: list[str] = field(default_factory=list)
+    items: list[ReferenceItem] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "summary": self.summary,
+            "keywords": self.keywords,
+            "items": [item.to_dict() for item in self.items],
+        }
+
+
+@dataclass(slots=True)
 class PlatformRunResult:
     platform: str
     instance_id: str
@@ -81,10 +123,11 @@ class PlatformRunResult:
     output_path: str
     started_at: str
     finished_at: str
-    extra: dict[str, Any] = field(default_factory=dict)
+    references: ReferenceData = field(default_factory=ReferenceData)
+    platform_extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        payload = {
+        return {
             "platform": self.platform,
             "instance_id": self.instance_id,
             "prompt": self.prompt,
@@ -93,9 +136,9 @@ class PlatformRunResult:
             "output_path": self.output_path,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "references": self.references.to_dict(),
+            "platform_extra": self.platform_extra,
         }
-        payload.update(self.extra)
-        return payload
 
     @classmethod
     def build(
@@ -111,6 +154,7 @@ class PlatformRunResult:
         finished_at: datetime,
         extra: dict[str, Any] | None = None,
     ) -> "PlatformRunResult":
+        references, platform_extra = cls._normalize_extra(extra or {})
         return cls(
             platform=platform,
             instance_id=instance_id,
@@ -120,8 +164,55 @@ class PlatformRunResult:
             output_path=str(output_path),
             started_at=started_at.astimezone(UTC).isoformat(),
             finished_at=finished_at.astimezone(UTC).isoformat(),
-            extra=extra or {},
+            references=references,
+            platform_extra=platform_extra,
         )
+
+    @staticmethod
+    def _normalize_extra(extra: dict[str, Any]) -> tuple[ReferenceData, dict[str, Any]]:
+        remaining = dict(extra)
+
+        references_raw = remaining.pop("references", None)
+        summary = remaining.pop("search_summary", None)
+        keywords_raw = remaining.pop("reference_keywords", [])
+        items_raw = remaining.pop("reference_items", [])
+        titles_raw = remaining.pop("reference_titles", [])
+
+        if isinstance(references_raw, dict):
+            summary = references_raw.get("summary", summary)
+            keywords_raw = references_raw.get("keywords", keywords_raw)
+            items_raw = references_raw.get("items", items_raw)
+            if not titles_raw:
+                titles_raw = references_raw.get("titles", [])
+
+        keywords = [
+            item.strip()
+            for item in keywords_raw
+            if isinstance(item, str) and item.strip()
+        ]
+
+        items: list[ReferenceItem] = []
+        if isinstance(items_raw, list) and items_raw:
+            for raw in items_raw:
+                if isinstance(raw, dict):
+                    item = ReferenceItem.from_mapping(raw)
+                elif isinstance(raw, str) and raw.strip():
+                    item = ReferenceItem(title=raw.strip())
+                else:
+                    continue
+                if item.title or item.source or item.published_at or item.url:
+                    items.append(item)
+        elif isinstance(titles_raw, list):
+            for index, raw_title in enumerate(titles_raw, start=1):
+                if isinstance(raw_title, str) and raw_title.strip():
+                    items.append(ReferenceItem(index=index, title=raw_title.strip()))
+
+        references = ReferenceData(
+            summary=summary if isinstance(summary, str) and summary.strip() else None,
+            keywords=keywords,
+            items=items,
+        )
+        return references, remaining
 
 
 DoubaoSelectors = ChatAppSelectors

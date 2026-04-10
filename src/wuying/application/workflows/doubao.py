@@ -33,11 +33,11 @@ class DoubaoWorkflow(ChatAppWorkflow):
             reference_elapsed,
             len(reference_titles),
         )
-        return {
-            "search_summary": search_summary,
-            "reference_keywords": reference_keywords,
-            "reference_titles": reference_titles,
-        }
+        return self._build_references_payload(
+            summary=search_summary,
+            keywords=reference_keywords,
+            items=reference_titles,
+        )
 
     def _extract_reference_metadata(self, visible_texts: list[str]) -> tuple[str | None, list[str], list[str]]:
         normalized = [self._normalize_visible_text(item) for item in visible_texts]
