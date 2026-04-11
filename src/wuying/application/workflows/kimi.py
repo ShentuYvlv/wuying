@@ -17,6 +17,8 @@ class KimiWorkflow(ComposeChatWorkflow):
     COPY_BUTTON_WAIT_SECONDS = 90
     COPY_BUTTON_POLL_INTERVAL_SECONDS = 0.35
     CLIPBOARD_UPDATE_WAIT_SECONDS = 2.0
+    REFERENCE_SHEET_WAIT_SECONDS = 4
+    REFERENCE_SHEET_POLL_INTERVAL_SECONDS = 0.25
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__(settings, settings.kimi)
@@ -32,7 +34,8 @@ class KimiWorkflow(ComposeChatWorkflow):
         return block or response
 
     def _collect_extra_metadata(self, driver: U2Driver, *, prompt: str, response: str) -> dict[str, object]:
-        return self._build_references_payload()
+        summary, items = self._collect_references(driver)
+        return self._build_references_payload(summary=summary, items=items)
 
     def _set_prompt_text(self, driver: U2Driver, *, prompt: str) -> None:
         target = self._find_kimi_input_by_label(driver)
@@ -317,6 +320,274 @@ class KimiWorkflow(ComposeChatWorkflow):
                     return copied
             time.sleep(0.12)
         return ""
+
+    def _collect_references(self, driver: U2Driver) -> tuple[str | None, list[dict[str, object]]]:
+        try:
+            if not self._open_reference_sheet(driver):
+                return None, []
+            summary, expected_count, items = self._read_reference_sheet(driver)
+            if expected_count is not None and len(items) < expected_count:
+                summary, items = self._read_reference_sheet_with_fast_scroll(
+                    driver,
+                    summary=summary,
+                    expected_count=expected_count,
+                    initial_items=items,
+                )
+            self._close_reference_sheet(driver)
+            return summary, items
+        except Exception as exc:
+            logger.warning("Failed to collect Kimi references: %s", exc)
+            return None, []
+
+    def _open_reference_sheet(self, driver: U2Driver) -> bool:
+        root = driver.dump_hierarchy_root()
+        if self._find_reference_summary(root)[0]:
+            return True
+
+        bounds = self._find_reference_button_bounds(root)
+        if bounds is None:
+            return False
+
+        left, top, right, bottom = bounds
+        self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+
+        deadline = time.monotonic() + self.REFERENCE_SHEET_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            root = driver.dump_hierarchy_root()
+            if self._find_reference_summary(root)[0]:
+                return True
+            time.sleep(self.REFERENCE_SHEET_POLL_INTERVAL_SECONDS)
+        return False
+
+    def _read_reference_sheet(self, driver: U2Driver) -> tuple[str | None, int | None, list[dict[str, object]]]:
+        root = driver.dump_hierarchy_root()
+        summary, expected_count, summary_bounds = self._find_reference_summary(root)
+        if not summary or summary_bounds is None:
+            return None, None, []
+        return summary, expected_count, self._extract_reference_rows(root, summary_bounds=summary_bounds)
+
+    def _read_reference_sheet_with_fast_scroll(
+        self,
+        driver: U2Driver,
+        *,
+        summary: str | None,
+        expected_count: int,
+        initial_items: list[dict[str, object]],
+    ) -> tuple[str | None, list[dict[str, object]]]:
+        items_by_key = {
+            (item.get("title"), item.get("source")): item
+            for item in initial_items
+            if item.get("title") or item.get("source")
+        }
+        max_swipes = max(0, min(4, (expected_count + 3) // 4))
+
+        for _ in range(max_swipes):
+            if len(items_by_key) >= expected_count:
+                break
+
+            root = driver.dump_hierarchy_root()
+            _, _, sheet_bounds = self._find_reference_summary(root)
+            if sheet_bounds is None:
+                break
+
+            # The summary is inside the bottom sheet. Swipe within the sheet, not the whole app.
+            sheet_bottom = self._find_reference_sheet_bottom(root)
+            if sheet_bottom is None:
+                break
+            summary_left, summary_top, summary_right, _ = sheet_bounds
+            driver.swipe_up_in_bounds(
+                (0, summary_top, max(summary_right, 720), sheet_bottom),
+                start_ratio=0.82,
+                end_ratio=0.30,
+                duration=0.08,
+            )
+            time.sleep(0.12)
+
+            next_summary, _, next_items = self._read_reference_sheet(driver)
+            summary = next_summary or summary
+            for item in next_items:
+                key = (item.get("title"), item.get("source"))
+                if key[0] or key[1]:
+                    items_by_key[key] = item
+
+        items = list(items_by_key.values())
+        for index, item in enumerate(items, start=1):
+            item["index"] = index
+        return summary, items
+
+    def _find_reference_button_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
+        parent_map = {child: parent for parent in root.iter() for child in parent}
+        candidates: list[tuple[int, tuple[int, int, int, int]]] = []
+        for node in root.iter("node"):
+            if node.attrib.get("package") != self.app.package_name:
+                continue
+            if self._node_label(node) != "引用":
+                continue
+
+            bounds = self._reference_label_click_bounds(node, parent_map)
+            if bounds is None:
+                continue
+
+            _, top, _, bottom = bounds
+            candidates.append((top + bottom, bounds))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def _reference_label_click_bounds(
+        self,
+        node: ET.Element,
+        parent_map: dict[ET.Element, ET.Element],
+    ) -> tuple[int, int, int, int] | None:
+        parent_bounds = self._nearest_clickable_bounds(node, parent_map)
+        if parent_bounds is not None:
+            left, top, right, bottom = parent_bounds
+            width = right - left
+            height = bottom - top
+            if 30 <= width <= 500 and 20 <= height <= 140:
+                return parent_bounds
+
+        text_bounds = U2Driver._parse_bounds(node.attrib.get("bounds", ""))
+        if text_bounds is None:
+            return None
+        if self._is_reasonable_action_button_bounds(text_bounds):
+            return text_bounds
+        return None
+
+    def _find_reference_summary(
+        self,
+        root: ET.Element,
+    ) -> tuple[str | None, int | None, tuple[int, int, int, int] | None]:
+        for node in root.iter("node"):
+            if node.attrib.get("package") != self.app.package_name:
+                continue
+            text = self._normalize_text(node.attrib.get("text", ""))
+            if not text:
+                continue
+            match = re.match(r"^引用来源\s*(\d+)?$", text)
+            if not match:
+                continue
+            bounds = U2Driver._parse_bounds(node.attrib.get("bounds", ""))
+            count = int(match.group(1)) if match.group(1) else None
+            return text, count, bounds
+        return None, None, None
+
+    def _extract_reference_rows(
+        self,
+        root: ET.Element,
+        *,
+        summary_bounds: tuple[int, int, int, int],
+    ) -> list[dict[str, object]]:
+        _, _, _, summary_bottom = summary_bounds
+        rows: list[tuple[int, dict[str, object]]] = []
+
+        for node in root.iter("node"):
+            attrs = node.attrib
+            if attrs.get("package") != self.app.package_name:
+                continue
+            if attrs.get("clickable") != "true":
+                continue
+
+            row_bounds = U2Driver._parse_bounds(attrs.get("bounds", ""))
+            if row_bounds is None:
+                continue
+            left, top, right, bottom = row_bounds
+            if top <= summary_bottom or right - left < 500 or bottom - top > 140:
+                continue
+
+            text_nodes = self._collect_row_text_nodes(node)
+            if not text_nodes:
+                continue
+
+            text_nodes.sort(key=lambda item: item[0])
+            title = text_nodes[0][1]
+            source = text_nodes[-1][1] if len(text_nodes) > 1 else None
+            if source == title:
+                source = None
+
+            rows.append(
+                (
+                    top,
+                    {
+                        "index": len(rows) + 1,
+                        "title": title,
+                        "source": source,
+                        "published_at": None,
+                        "url": None,
+                    },
+                )
+            )
+
+        rows.sort(key=lambda item: item[0])
+        items: list[dict[str, object]] = []
+        seen: set[tuple[object, object]] = set()
+        for _, item in rows:
+            key = (item.get("title"), item.get("source"))
+            if key in seen:
+                continue
+            seen.add(key)
+            item["index"] = len(items) + 1
+            items.append(item)
+        return items
+
+    def _collect_row_text_nodes(self, row: ET.Element) -> list[tuple[int, str]]:
+        text_nodes: list[tuple[int, str]] = []
+        for child in row.iter("node"):
+            if child.attrib.get("package") != self.app.package_name:
+                continue
+            if child.attrib.get("class") != "android.widget.TextView":
+                continue
+            text = self._normalize_text(child.attrib.get("text", ""))
+            if not text or text.startswith("引用来源"):
+                continue
+
+            bounds = U2Driver._parse_bounds(child.attrib.get("bounds", ""))
+            if bounds is None:
+                continue
+            left, _, _, _ = bounds
+            text_nodes.append((left, text))
+        return text_nodes
+
+    def _find_reference_sheet_bottom(self, root: ET.Element) -> int | None:
+        _, _, summary_bounds = self._find_reference_summary(root)
+        if summary_bounds is None:
+            return None
+
+        _, summary_top, _, _ = summary_bounds
+        best_bottom: int | None = None
+        for node in root.iter("node"):
+            if node.attrib.get("package") != self.app.package_name:
+                continue
+            bounds = U2Driver._parse_bounds(node.attrib.get("bounds", ""))
+            if bounds is None:
+                continue
+            left, top, right, bottom = bounds
+            if left == 0 and right >= 700 and top <= summary_top <= bottom and bottom <= 1210:
+                if best_bottom is None or bottom > best_bottom:
+                    best_bottom = bottom
+        return best_bottom
+
+    def _close_reference_sheet(self, driver: U2Driver) -> None:
+        root = driver.dump_hierarchy_root()
+        bounds = self._find_close_sheet_bounds(root)
+        if bounds is None:
+            return
+        left, top, right, bottom = bounds
+        self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+        time.sleep(0.1)
+
+    def _find_close_sheet_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
+        for node in root.iter("node"):
+            if node.attrib.get("package") != self.app.package_name:
+                continue
+            if self._node_label(node) != "关闭工作表":
+                continue
+            bounds = U2Driver._parse_bounds(node.attrib.get("bounds", ""))
+            if bounds is not None:
+                return bounds
+        return None
 
     def _find_completed_response_copy_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
         parent_map = {child: parent for parent in root.iter() for child in parent}
