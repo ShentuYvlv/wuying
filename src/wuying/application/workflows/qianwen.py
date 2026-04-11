@@ -470,8 +470,12 @@ class QianwenWorkflow(ComposeChatWorkflow):
 
         left, top, right, bottom = menu_bounds
         self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
-        time.sleep(0.3)
-        return self._click_new_chat_if_visible(driver)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if self._click_new_chat_if_visible(driver):
+                return True
+            time.sleep(0.15)
+        return False
 
     def _click_new_chat_if_visible(self, driver: U2Driver) -> bool:
         root = driver.dump_hierarchy_root()

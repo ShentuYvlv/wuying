@@ -16,6 +16,7 @@ class KimiWorkflow(ComposeChatWorkflow):
     platform_name = "kimi"
     COPY_BUTTON_WAIT_SECONDS = 90
     COPY_BUTTON_POLL_INTERVAL_SECONDS = 0.35
+    COPY_BUTTON_SCROLL_INTERVAL_SECONDS = 1.0
     CLIPBOARD_UPDATE_WAIT_SECONDS = 2.0
     REFERENCE_SHEET_WAIT_SECONDS = 4
     REFERENCE_SHEET_POLL_INTERVAL_SECONDS = 0.25
@@ -283,6 +284,7 @@ class KimiWorkflow(ComposeChatWorkflow):
 
         logger.info("Waiting for Kimi answer copy button.")
         deadline = time.monotonic() + self.COPY_BUTTON_WAIT_SECONDS
+        last_scroll_ts = 0.0
         while time.monotonic() < deadline:
             root = driver.dump_hierarchy_root()
             bounds = self._find_completed_response_copy_bounds(root)
@@ -297,9 +299,48 @@ class KimiWorkflow(ComposeChatWorkflow):
                 if copied:
                     return copied
 
+            now = time.monotonic()
+            if now - last_scroll_ts >= self.COPY_BUTTON_SCROLL_INTERVAL_SECONDS:
+                self._scroll_towards_answer_bottom(driver, root=root)
+                last_scroll_ts = now
             time.sleep(self.COPY_BUTTON_POLL_INTERVAL_SECONDS)
 
         return ""
+
+    def _scroll_towards_answer_bottom(self, driver: U2Driver, *, root: ET.Element) -> None:
+        jump_bounds = self._find_jump_to_bottom_bounds(root)
+        if jump_bounds is not None:
+            left, top, right, bottom = jump_bounds
+            self.adb.input_tap(
+                driver.serial,
+                x=(left + right) // 2,
+                y=(top + bottom) // 2,
+            )
+            time.sleep(0.12)
+            return
+
+        try:
+            driver.swipe_up(start_ratio=0.78, end_ratio=0.34, x_ratio=0.5)
+        except Exception as exc:
+            logger.debug("Kimi answer-bottom scroll failed: %s", exc)
+
+    def _find_jump_to_bottom_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
+        candidates: list[tuple[int, tuple[int, int, int, int]]] = []
+        for node in root.iter("node"):
+            if node.attrib.get("package") != self.app.package_name:
+                continue
+            if self._node_label(node) != "JumpToBottom":
+                continue
+            bounds = U2Driver._parse_bounds(node.attrib.get("bounds", ""))
+            if bounds is None:
+                continue
+            _, top, _, bottom = bounds
+            candidates.append((top + bottom, bounds))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
 
     def _read_valid_clipboard(self, driver: U2Driver, *, sentinel: str, prompt: str) -> str:
         deadline = time.monotonic() + self.CLIPBOARD_UPDATE_WAIT_SECONDS
