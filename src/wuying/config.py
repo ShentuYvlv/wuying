@@ -174,6 +174,7 @@ class AppSettings:
     doubao: ChatAppSettings
     deepseek: ChatAppSettings
     kimi: ChatAppSettings
+    qianwen: ChatAppSettings
     instance_ids: list[str]
 
     @classmethod
@@ -307,6 +308,40 @@ class AppSettings:
             response_selectors=[],
         )
 
+        qianwen_defaults = ChatAppSelectors(
+            new_chat_selectors=[
+                SelectorSpec(description_contains="新建"),
+                SelectorSpec(description_contains="新对话"),
+                SelectorSpec(text_contains="新对话"),
+            ],
+            chat_back_selectors=[
+                SelectorSpec(description_contains="返回"),
+                SelectorSpec(text="返回"),
+            ],
+            enter_chat_selectors=[
+                SelectorSpec(text_contains="发消息"),
+                SelectorSpec(text_contains="按住说话"),
+                SelectorSpec(class_name="android.widget.EditText"),
+            ],
+            switch_to_text_input_selectors=[
+                SelectorSpec(description_contains="文本输入"),
+                SelectorSpec(text_contains="按住说话"),
+            ],
+            reference_expand_selectors=[],
+            input_selectors=[
+                SelectorSpec(text_contains="发消息"),
+                SelectorSpec(text_contains="按住说话"),
+                SelectorSpec(class_name="android.widget.EditText"),
+            ],
+            send_selectors=[
+                SelectorSpec(description="发送"),
+                SelectorSpec(description_contains="发送"),
+                SelectorSpec(text="发送"),
+                SelectorSpec(text_contains="发送"),
+            ],
+            response_selectors=[],
+        )
+
         return cls(
             aliyun=AliyunSettings(
                 access_key_id=access_key_id,
@@ -356,6 +391,17 @@ class AppSettings:
                 default_response_settle_seconds=4,
                 default_message_list_resource_id=None,
                 default_selectors=kimi_defaults,
+            ),
+            qianwen=_build_chat_app_settings(
+                env_prefix="QIANWEN",
+                platform_name="qianwen",
+                default_package_name="com.aliyun.tongyi",
+                default_launch_activity="com.ucpro.MainActivity",
+                default_output_dir="data/runs",
+                default_response_timeout_seconds=120,
+                default_response_settle_seconds=4,
+                default_message_list_resource_id=None,
+                default_selectors=qianwen_defaults,
             ),
             instance_ids=_get_csv("WUYING_INSTANCE_IDS"),
         )
