@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -18,7 +19,7 @@ class QianwenWorkflow(ComposeChatWorkflow):
     FULL_RESPONSE_SETTLE_SECONDS = 2
     REFERENCE_PANEL_WAIT_SECONDS = 4
     REFERENCE_PANEL_POLL_INTERVAL_SECONDS = 0.25
-    REFERENCE_PANEL_MAX_SWIPES = 6
+    REFERENCE_PANEL_MAX_SWIPES = 24
     REFERENCE_ENTRY_SCAN_SWIPES = 4
 
     def __init__(self, settings: AppSettings) -> None:
@@ -130,21 +131,40 @@ class QianwenWorkflow(ComposeChatWorkflow):
         expected_count: int | None,
     ) -> list[dict[str, object]]:
         items_by_index: dict[int, dict[str, object]] = {}
+        stable_rounds = 0
 
-        for swipe_index in range(self.REFERENCE_PANEL_MAX_SWIPES + 1):
+        root = driver.dump_hierarchy_root()
+        for item in self._extract_numbered_reference_items(root):
+            index = item.get("index")
+            if isinstance(index, int):
+                items_by_index[index] = item
+        last_seen_count = len(items_by_index)
+
+        max_swipes = self._reference_panel_swipe_count(
+            expected_count=expected_count,
+            visible_count=len(items_by_index),
+        )
+
+        for swipe_index in range(max_swipes):
+            if expected_count is not None and len(items_by_index) >= expected_count:
+                break
+
+            self._fast_swipe_reference_panel(driver, root=root)
+            time.sleep(0.04)
             root = driver.dump_hierarchy_root()
+
             for item in self._extract_numbered_reference_items(root):
                 index = item.get("index")
                 if isinstance(index, int):
                     items_by_index[index] = item
 
-            if expected_count is not None and len(items_by_index) >= expected_count:
+            if len(items_by_index) <= last_seen_count:
+                stable_rounds += 1
+            else:
+                stable_rounds = 0
+            last_seen_count = len(items_by_index)
+            if expected_count is None and stable_rounds >= 2:
                 break
-            if swipe_index >= self.REFERENCE_PANEL_MAX_SWIPES:
-                break
-
-            driver.swipe_up_in_best_container()
-            time.sleep(0.12)
 
         items = [items_by_index[index] for index in sorted(items_by_index)]
         if expected_count is not None:
@@ -152,6 +172,59 @@ class QianwenWorkflow(ComposeChatWorkflow):
         for index, item in enumerate(items, start=1):
             item["index"] = index
         return items
+
+    def _reference_panel_swipe_count(self, *, expected_count: int | None, visible_count: int) -> int:
+        if expected_count is None:
+            return 3
+        if visible_count <= 0:
+            return min(self.REFERENCE_PANEL_MAX_SWIPES, 4)
+        remaining = max(0, expected_count - visible_count)
+        estimated = math.ceil(remaining / max(1, visible_count - 2)) + 2
+        return max(1, min(self.REFERENCE_PANEL_MAX_SWIPES, estimated))
+
+    def _fast_swipe_reference_panel(self, driver: U2Driver, *, root: ET.Element) -> None:
+        bounds = self._find_reference_scroll_bounds(root)
+        if bounds is None:
+            try:
+                width, height = driver.device.window_size()
+            except Exception as exc:
+                raise U2DriverError("Failed to read device window size for Qianwen reference swipe.") from exc
+            bounds = (0, int(height * 0.16), width, int(height * 0.94))
+
+        left, top, right, bottom = bounds
+        x = (left + right) // 2
+        start_y = int(top + (bottom - top) * 0.82)
+        end_y = int(top + (bottom - top) * 0.24)
+        driver.device.swipe(x, start_y, x, end_y, 0.08)
+
+    def _find_reference_scroll_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
+        item_bounds: list[tuple[int, int, int, int]] = []
+        for node in root.iter("node"):
+            text = self._normalize_text(node.attrib.get("text", ""))
+            if not re.match(r"^\d+\.\s*.+$", text):
+                continue
+            bounds = U2Driver._parse_bounds(node.attrib.get("bounds", ""))
+            if bounds is not None:
+                item_bounds.append(bounds)
+
+        if not item_bounds:
+            return None
+
+        left = min(item[0] for item in item_bounds)
+        top = min(item[1] for item in item_bounds)
+        right = max(item[2] for item in item_bounds)
+        bottom = max(item[3] for item in item_bounds)
+        app_bounds = self._find_app_bounds(root)
+        if app_bounds is None:
+            return (max(0, left - 40), max(0, top - 80), right + 40, bottom + 420)
+
+        app_left, app_top, app_right, app_bottom = app_bounds
+        return (
+            app_left,
+            max(app_top, top - 80),
+            app_right,
+            app_bottom,
+        )
 
     def _extract_numbered_reference_items(self, root: ET.Element) -> list[dict[str, object]]:
         nodes: list[tuple[int, int, str]] = []
