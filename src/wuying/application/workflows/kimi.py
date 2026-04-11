@@ -320,10 +320,7 @@ class KimiWorkflow(ComposeChatWorkflow):
 
     def _find_completed_response_copy_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
         parent_map = {child: parent for parent in root.iter() for child in parent}
-        labeled = self._find_labeled_copy_button_bounds(root, parent_map)
-        if labeled is not None:
-            return labeled
-        return self._find_action_row_copy_button_bounds(root)
+        return self._find_labeled_copy_button_bounds(root, parent_map)
 
     def _find_labeled_copy_button_bounds(
         self,
@@ -351,61 +348,6 @@ class KimiWorkflow(ComposeChatWorkflow):
             return None
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1]
-
-    def _find_action_row_copy_button_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
-        app_bounds = self._find_app_bounds(root)
-        if app_bounds is None:
-            return None
-
-        app_left, app_top, app_right, app_bottom = app_bounds
-        input_bounds = self._find_edit_text_bounds(root)
-        max_y = input_bounds[1] - 12 if input_bounds is not None else app_bottom - 80
-        min_y = app_top + 100
-        max_x = app_left + min(260, int((app_right - app_left) * 0.42))
-
-        candidates: list[tuple[int, int, tuple[int, int, int, int]]] = []
-        for node in root.iter("node"):
-            attrs = node.attrib
-            if attrs.get("package") != self.app.package_name:
-                continue
-            if attrs.get("clickable") != "true":
-                continue
-
-            bounds = U2Driver._parse_bounds(attrs.get("bounds", ""))
-            if bounds is None or not self._is_reasonable_action_button_bounds(bounds):
-                continue
-
-            left, top, right, bottom = bounds
-            center_x = (left + right) // 2
-            center_y = (top + bottom) // 2
-            if center_y < min_y or center_y > max_y:
-                continue
-            if center_x > max_x:
-                continue
-
-            label = self._node_label(node)
-            if any(token in label for token in ("导航", "菜单", "新会话", "返回", "发送")):
-                continue
-
-            candidates.append((center_y, center_x, bounds))
-
-        row = self._bottom_action_row(candidates)
-        if len(row) < 2:
-            return None
-
-        row.sort(key=lambda item: item[1])
-        return row[1][2]
-
-    @staticmethod
-    def _bottom_action_row(
-        candidates: list[tuple[int, int, tuple[int, int, int, int]]],
-    ) -> list[tuple[int, int, tuple[int, int, int, int]]]:
-        if not candidates:
-            return []
-
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        anchor_y = candidates[0][0]
-        return [item for item in candidates if abs(item[0] - anchor_y) <= 36]
 
     @staticmethod
     def _nearest_clickable_bounds(
