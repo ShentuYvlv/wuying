@@ -173,6 +173,7 @@ class AppSettings:
     device: DeviceSettings
     doubao: ChatAppSettings
     deepseek: ChatAppSettings
+    kimi: ChatAppSettings
     instance_ids: list[str]
 
     @classmethod
@@ -272,6 +273,40 @@ class AppSettings:
             response_selectors=[],
         )
 
+        kimi_defaults = ChatAppSelectors(
+            new_chat_selectors=[
+                SelectorSpec(description="开启新会话"),
+                SelectorSpec(description_contains="开启新会话"),
+                SelectorSpec(text="新会话"),
+            ],
+            chat_back_selectors=[
+                SelectorSpec(description="导航按钮"),
+                SelectorSpec(description_contains="返回"),
+            ],
+            enter_chat_selectors=[
+                SelectorSpec(class_name="android.widget.EditText"),
+                SelectorSpec(text="Kimi"),
+            ],
+            switch_to_text_input_selectors=[
+                SelectorSpec(description="切换至文字输入"),
+                SelectorSpec(description_contains="切换至文字输入"),
+            ],
+            reference_expand_selectors=[],
+            input_selectors=[
+                SelectorSpec(text_contains="尽管问"),
+                SelectorSpec(text_contains="发消息"),
+                SelectorSpec(text_contains="按住说话"),
+                SelectorSpec(class_name="android.widget.EditText"),
+            ],
+            send_selectors=[
+                SelectorSpec(description="发送讯息"),
+                SelectorSpec(description_contains="发送讯息"),
+                SelectorSpec(description="发送消息"),
+                SelectorSpec(description_contains="发送消息"),
+            ],
+            response_selectors=[],
+        )
+
         return cls(
             aliyun=AliyunSettings(
                 access_key_id=access_key_id,
@@ -310,6 +345,17 @@ class AppSettings:
                 default_response_settle_seconds=4,
                 default_message_list_resource_id=None,
                 default_selectors=deepseek_defaults,
+            ),
+            kimi=_build_chat_app_settings(
+                env_prefix="KIMI",
+                platform_name="kimi",
+                default_package_name="com.moonshot.kimichat",
+                default_launch_activity="com.moonshot.kimichat.MainActivity",
+                default_output_dir="data/runs",
+                default_response_timeout_seconds=120,
+                default_response_settle_seconds=4,
+                default_message_list_resource_id=None,
+                default_selectors=kimi_defaults,
             ),
             instance_ids=_get_csv("WUYING_INSTANCE_IDS"),
         )

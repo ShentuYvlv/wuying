@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from wuying.application.workflows.base import ChatAppWorkflow
 from wuying.application.workflows.deepseek import DeepseekWorkflow
 from wuying.application.workflows.doubao import DoubaoWorkflow
+from wuying.application.workflows.kimi import KimiWorkflow
 from wuying.config import AppSettings
 
 
@@ -25,6 +26,11 @@ PLATFORM_REGISTRY: dict[str, PlatformDefinition] = {
         name="deepseek",
         workflow_class=DeepseekWorkflow,
         description="DeepSeek app automation",
+    ),
+    "kimi": PlatformDefinition(
+        name="kimi",
+        workflow_class=KimiWorkflow,
+        description="Kimi app automation",
     ),
 }
 

@@ -38,7 +38,7 @@ class ChatAppWorkflow(ABC):
         self._ensure_app_foreground(driver)
         self._ensure_new_chat_session(driver)
         self._ensure_chat_input_ready(driver)
-        driver.set_text(self.app.selectors.input_selectors, prompt, timeout_seconds=30)
+        self._set_prompt_text(driver, prompt=prompt)
         self._send_prompt(driver, prompt=prompt)
 
         response = driver.wait_for_new_response(
@@ -48,6 +48,7 @@ class ChatAppWorkflow(ABC):
             message_root_resource_id=self.app.message_list_resource_id,
             response_selectors=self.app.selectors.response_selectors,
         )
+        response = self._finalize_response(driver, prompt=prompt, response=response)
         extra = self._collect_extra_metadata(driver, prompt=prompt, response=response)
 
         finished_at = datetime.now(tz=UTC)
@@ -153,6 +154,12 @@ class ChatAppWorkflow(ABC):
 
     def _send_prompt(self, driver: U2Driver, *, prompt: str) -> None:
         driver.click(self.app.selectors.send_selectors, timeout_seconds=30)
+
+    def _set_prompt_text(self, driver: U2Driver, *, prompt: str) -> None:
+        driver.set_text(self.app.selectors.input_selectors, prompt, timeout_seconds=30)
+
+    def _finalize_response(self, driver: U2Driver, *, prompt: str, response: str) -> str:
+        return response
 
     @staticmethod
     def _build_references_payload(

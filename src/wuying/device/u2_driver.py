@@ -304,6 +304,13 @@ class U2Driver:
         text = value.strip()
         if not text:
             return False
+        line_count = len([line for line in text.splitlines() if line.strip()])
+        if "正在搜索网页" in text and line_count <= 4:
+            return True
+        if "我来帮您搜索" in text and line_count <= 4:
+            return True
+        if "搜索网页" in text and line_count <= 4:
+            return True
         if re.search(r"找到\s*\d+\s*篇资料", text):
             return True
         if re.search(r"搜索\s*\d+\s*个关键词.*参考\s*\d+\s*篇资料", text):
