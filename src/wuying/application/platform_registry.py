@@ -7,6 +7,7 @@ from wuying.application.workflows.deepseek import DeepseekWorkflow
 from wuying.application.workflows.doubao import DoubaoWorkflow
 from wuying.application.workflows.kimi import KimiWorkflow
 from wuying.application.workflows.qianwen import QianwenWorkflow
+from wuying.application.workflows.yuanbao import YuanbaoWorkflow
 from wuying.config import AppSettings
 
 
@@ -37,6 +38,11 @@ PLATFORM_REGISTRY: dict[str, PlatformDefinition] = {
         name="qianwen",
         workflow_class=QianwenWorkflow,
         description="Qianwen app automation",
+    ),
+    "yuanbao": PlatformDefinition(
+        name="yuanbao",
+        workflow_class=YuanbaoWorkflow,
+        description="Yuanbao app automation",
     ),
 }
 
