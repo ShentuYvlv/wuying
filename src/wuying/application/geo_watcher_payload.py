@@ -24,13 +24,11 @@ def build_geo_watcher_records(
             "query": raw_result.get("prompt", ""),
             "response": raw_result.get("response", ""),
             **MOCK_METRICS,
+            "attitude": MOCK_ATTITUDE,
             "platform_id": platform_id,
             "platform": raw_result.get("platform", ""),
             "references": raw_result.get("references", {}),
             "raw_output_path": raw_result.get("output_path", ""),
-        },
-        {
-            "attitude": MOCK_ATTITUDE,
         },
     ]
 

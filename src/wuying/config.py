@@ -229,6 +229,7 @@ class AppSettings:
                 SelectorSpec(class_name="android.widget.EditText"),
             ],
             send_selectors=[
+                SelectorSpec(resource_id="com.larus.nova:id/action_send"),
                 SelectorSpec(description="发送"),
                 SelectorSpec(text="发送"),
             ],

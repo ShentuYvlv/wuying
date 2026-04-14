@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing as mp
+import os
 import queue
 import threading
+import time
 import traceback
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -91,9 +94,18 @@ class TaskStore:
     def write(self, task: dict[str, Any]) -> None:
         path = self.path_for(str(task["task_id"]))
         tmp_path = path.with_suffix(".tmp")
+        content = json.dumps(task, ensure_ascii=False, indent=2)
         with self._lock:
-            tmp_path.write_text(json.dumps(task, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp_path.replace(path)
+            tmp_path.write_text(content, encoding="utf-8")
+            try:
+                _replace_with_retry(tmp_path, path)
+            except PermissionError:
+                logger.debug("Atomic task file replace failed; falling back to direct write: %s", path)
+                path.write_text(content, encoding="utf-8")
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
 
     def update(self, task_id: str, **changes: Any) -> dict[str, Any]:
         task = self.read(task_id)
@@ -109,10 +121,16 @@ class CrawlerTaskService:
         settings: AppSettings,
         store: TaskStore | None = None,
         callback_payload_dir: Path = Path("data/callback_payloads"),
+        record_timeout_seconds: int | None = None,
     ) -> None:
         self.settings = settings
         self.store = store or TaskStore()
         self.callback_payload_dir = callback_payload_dir
+        self.record_timeout_seconds = record_timeout_seconds
+        if self.record_timeout_seconds is None:
+            self.record_timeout_seconds = _int_env("CRAWLER_RECORD_TIMEOUT_SECONDS", 300)
+        if self.record_timeout_seconds <= 0:
+            raise ValueError("CRAWLER_RECORD_TIMEOUT_SECONDS must be greater than 0")
         self.callback_payload_dir.mkdir(parents=True, exist_ok=True)
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._worker: threading.Thread | None = None
@@ -168,15 +186,16 @@ class CrawlerTaskService:
 
         results: list[dict[str, Any]] = []
         failed_records = 0
+        last_error: str | None = None
 
         for repeat_index in range(1, int(task["repeat"]) + 1):
             for prompt_index, prompt in enumerate(task["prompts"], start=1):
                 try:
-                    result = run_platform_once(
-                        settings=self.settings,
+                    result = _run_platform_once_with_timeout(
                         platform_name=internal_platform,
                         prompt=str(prompt),
                         instance_id=str(instance_id),
+                        timeout_seconds=self.record_timeout_seconds,
                     ).to_dict()
                     result["geo_watcher"] = {
                         "platform_id": task["type"],
@@ -186,12 +205,12 @@ class CrawlerTaskService:
                     results.append(result)
                 except Exception as exc:
                     failed_records += 1
-                    error_text = str(exc)
+                    last_error = str(exc)
                     results.append(
                         {
                             "platform": internal_platform,
                             "prompt": prompt,
-                            "error": error_text,
+                            "error": last_error,
                             "traceback": traceback.format_exc(),
                             "geo_watcher": {
                                 "platform_id": task["type"],
@@ -206,7 +225,7 @@ class CrawlerTaskService:
                     results=results,
                     finished_records=len(results),
                     failed_records=failed_records,
-                    error=error_text if failed_records else None,
+                    error=last_error,
                 )
 
         callback = self._write_and_upload_callback_payload(task_id=task_id, task=task, results=results)
@@ -261,7 +280,8 @@ class CrawlerTaskService:
         }
 
         try:
-            with httpx.Client(timeout=30) as client:
+            logger.info("Uploading callback payload for %s to %s", task_id, callback_url)
+            with httpx.Client(timeout=30, trust_env=False) as client:
                 with payload_path.open("rb") as payload_file:
                     response = client.post(
                         callback_url,
@@ -270,6 +290,15 @@ class CrawlerTaskService:
                         files={"files": (payload_path.name, payload_file, "application/json")},
                     )
             callback_status = "uploaded" if response.status_code < 400 else "failed"
+            if callback_status == "uploaded":
+                logger.info("Callback payload uploaded for %s: status_code=%s", task_id, response.status_code)
+            else:
+                logger.warning(
+                    "Callback payload failed for %s: status_code=%s response=%s",
+                    task_id,
+                    response.status_code,
+                    _response_text(response),
+                )
             return {
                 "status": callback_status,
                 "payload_path": str(payload_path),
@@ -277,6 +306,7 @@ class CrawlerTaskService:
                 "response": _response_text(response),
             }
         except Exception as exc:
+            logger.warning("Callback payload upload raised for %s: %s", task_id, exc)
             return {
                 "status": "failed",
                 "payload_path": str(payload_path),
@@ -291,6 +321,100 @@ def validate_platform_id(platform_id: str) -> str:
     return platform_id
 
 
+def _run_platform_once_with_timeout(
+    *,
+    platform_name: str,
+    prompt: str,
+    instance_id: str,
+    timeout_seconds: int,
+):
+    context = mp.get_context("spawn")
+    result_path = _ipc_result_path(platform_name)
+    process = context.Process(
+        target=_run_platform_once_child,
+        args=(str(result_path), platform_name, prompt, instance_id),
+        name=f"wuying-{platform_name}-record",
+    )
+    process.start()
+    process.join(timeout_seconds)
+
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=5)
+        logger.warning(
+            "Crawler record timed out after %ss: platform=%s, instance_id=%s",
+            timeout_seconds,
+            platform_name,
+            instance_id,
+        )
+        try:
+            result_path.unlink()
+        except OSError:
+            pass
+        raise TimeoutError(
+            f"Crawler record timed out after {timeout_seconds}s: "
+            f"platform={platform_name}, instance_id={instance_id}"
+        )
+
+    if not result_path.exists():
+        raise RuntimeError(
+            f"Crawler record exited without result: platform={platform_name}, exitcode={process.exitcode}"
+        )
+
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    try:
+        result_path.unlink()
+    except OSError:
+        pass
+    if payload.get("ok"):
+        return _DictBackedResult(payload["result"])
+
+    raise RuntimeError(str(payload.get("error") or "Crawler record failed in child process"))
+
+
+def _run_platform_once_child(
+    result_path: str,
+    platform_name: str,
+    prompt: str,
+    instance_id: str,
+) -> None:
+    try:
+        from wuying.logging_utils import configure_logging
+
+        configure_logging()
+        settings = AppSettings.from_env()
+        result = run_platform_once(
+            settings=settings,
+            platform_name=platform_name,
+            prompt=prompt,
+            instance_id=instance_id,
+        ).to_dict()
+        _write_child_result(result_path, {"ok": True, "result": result})
+    except Exception:
+        _write_child_result(result_path, {"ok": False, "error": traceback.format_exc()})
+
+
+def _ipc_result_path(platform_name: str) -> Path:
+    root_dir = Path(os.getenv("CRAWLER_TASK_IPC_DIR", "data/task_ipc"))
+    root_dir.mkdir(parents=True, exist_ok=True)
+    return root_dir / f"{platform_name}_{uuid4().hex}.json"
+
+
+def _write_child_result(result_path: str, payload: dict[str, Any]) -> None:
+    Path(result_path).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+@dataclass(frozen=True, slots=True)
+class _DictBackedResult:
+    data: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.data
+
+
 def _final_status(*, total: int, failed: int) -> str:
     if total == 0 or failed == total:
         return "failed"
@@ -300,10 +424,29 @@ def _final_status(*, total: int, failed: int) -> str:
 
 
 def _optional_env(name: str) -> str | None:
-    import os
-
     value = os.getenv(name, "").strip()
     return value or None
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"Environment variable {name} must be an integer, got {raw!r}") from exc
+
+
+def _replace_with_retry(source: Path, target: Path) -> None:
+    last_error: PermissionError | None = None
+    for _ in range(5):
+        try:
+            source.replace(target)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.1)
+    assert last_error is not None
+    raise last_error
 
 
 def _first_string(*values: Any) -> str | None:

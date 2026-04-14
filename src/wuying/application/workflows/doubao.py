@@ -6,7 +6,7 @@ import time
 import xml.etree.ElementTree as ET
 
 from wuying.config import AppSettings
-from wuying.invokers import U2Driver
+from wuying.invokers import U2Driver, U2DriverError
 from wuying.application.workflows.base import ChatAppWorkflow
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,130 @@ class DoubaoWorkflow(ChatAppWorkflow):
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__(settings, settings.doubao)
+
+    def _ensure_chat_input_ready(self, driver: U2Driver) -> None:
+        self._handle_update_dialog(driver)
+        super()._ensure_chat_input_ready(driver)
+
+    def _send_prompt(self, driver: U2Driver, *, prompt: str) -> None:
+        try:
+            super()._send_prompt(driver, prompt=prompt)
+            return
+        except U2DriverError:
+            pass
+
+        root = driver.dump_hierarchy_root()
+        input_bounds = self._find_prompt_input_bounds(root, prompt=prompt)
+        if input_bounds is None:
+            raise U2DriverError("Doubao prompt was not written into the chat input; stop before fallback tapping.")
+
+        send_bounds = self._find_send_button_bounds(root, input_bounds=input_bounds)
+        if send_bounds is None:
+            raise U2DriverError("Doubao send button not found after prompt input.")
+
+        left, top, right, bottom = send_bounds
+        self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+        time.sleep(0.2)
+
+    def _handle_update_dialog(self, driver: U2Driver) -> None:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            root = driver.dump_hierarchy_root()
+            button_bounds = self._find_update_now_button_bounds(root)
+            if button_bounds is None:
+                return
+
+            left, top, right, bottom = button_bounds
+            logger.info("Doubao update dialog detected; clicking update now.")
+            self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+            time.sleep(1.0)
+
+    def _find_update_now_button_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
+        has_update_dialog = False
+        candidates: list[tuple[int, tuple[int, int, int, int]]] = []
+        for node in root.iter("node"):
+            text = self._normalize_visible_text(node.attrib.get("text", ""))
+            if "发现新版本" in text or "新版本" in text:
+                has_update_dialog = True
+            if "立即更新" not in text:
+                continue
+
+            bounds = U2Driver._parse_bounds(node.attrib.get("bounds", ""))
+            if bounds is None:
+                continue
+            _, top, _, bottom = bounds
+            candidates.append((top + bottom, bounds))
+
+        if not has_update_dialog or not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def _find_prompt_input_bounds(self, root: ET.Element, *, prompt: str) -> tuple[int, int, int, int] | None:
+        expected = re.sub(r"\s+", "", prompt)
+        candidates: list[tuple[int, tuple[int, int, int, int]]] = []
+        for node in root.iter("node"):
+            if node.attrib.get("package") != self.app.package_name:
+                continue
+            text = re.sub(r"\s+", "", node.attrib.get("text", ""))
+            if not text or expected not in text:
+                continue
+            bounds = U2Driver._parse_bounds(node.attrib.get("bounds", ""))
+            if bounds is None:
+                continue
+            _, top, _, bottom = bounds
+            score = bottom
+            if node.attrib.get("class") == "android.widget.EditText":
+                score += 10_000
+            candidates.append((score, bounds))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def _find_send_button_bounds(
+        self,
+        root: ET.Element,
+        *,
+        input_bounds: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int] | None:
+        _, input_top, input_right, input_bottom = input_bounds
+        candidates: list[tuple[int, tuple[int, int, int, int]]] = []
+        for node in root.iter("node"):
+            if node.attrib.get("package") != self.app.package_name:
+                continue
+
+            attrs = node.attrib
+            bounds = U2Driver._parse_bounds(attrs.get("bounds", ""))
+            if bounds is None:
+                continue
+
+            left, top, right, bottom = bounds
+            width = right - left
+            height = bottom - top
+            if width <= 0 or height <= 0 or width > 170 or height > 170:
+                continue
+
+            center_x = (left + right) // 2
+            center_y = (top + bottom) // 2
+            if center_x < input_right - 20:
+                continue
+            if center_y < input_top - 70 or center_y > input_bottom + 90:
+                continue
+
+            label = self._normalize_visible_text(attrs.get("text", "") or attrs.get("content-desc", ""))
+            if any(token in label for token in ("更多", "面板", "语音", "相机")):
+                continue
+            if attrs.get("clickable") == "true" or "send" in attrs.get("resource-id", "").lower():
+                candidates.append((center_x, bounds))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
 
     def _collect_extra_metadata(self, driver: U2Driver, *, prompt: str, response: str) -> dict[str, object]:
         reference_started_at = time.perf_counter()

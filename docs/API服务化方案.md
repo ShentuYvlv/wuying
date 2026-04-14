@@ -190,6 +190,7 @@ WUYING_CRAWLER_ALIAS=wuying-crawler
 SCRAPER_API_KEY=<GEO-watcher 调用本 crawler 的 key>
 CRAWLER_CALLBACK_URL=http://geo-watcher-backend:3005/api/integrations/crawler/uploads
 CRAWLER_CALLBACK_API_KEY=<双方约定的 callback key>
+CRAWLER_RECORD_TIMEOUT_SECONDS=300
 WUYING_MANUAL_ADB_ENDPOINT=106.14.114.146:100
 WUYING_INSTANCE_IDS=acp-xxxxxxxxxxxxxxxx
 ADB_PATH=/app/platform-tools/adb
@@ -200,6 +201,7 @@ ADB_PATH=/app/platform-tools/adb
 - `SCRAPER_API_KEY` 必须和 GEO-watcher 请求本 crawler 时使用的 `CRAWLER_API_KEY` 对得上
 - `CRAWLER_CALLBACK_API_KEY` 必须和 GEO-watcher backend 的 `CRAWLER_CALLBACK_API_KEY` 一致
 - `CRAWLER_CALLBACK_URL` 必须用 Docker 网络别名 `geo-watcher-backend`
+- `CRAWLER_RECORD_TIMEOUT_SECONDS` 是单条 prompt 的硬超时，默认 `300` 秒
 - 当前不要给本项目单独设置另一套入站 API Key，除非 GEO-watcher 已经支持按平台配置 API Key
 
 ## 入站接口
@@ -251,6 +253,7 @@ wuying-yuanbao
 - 把 `wuying-doubao` 映射到内部 `doubao` workflow
 - 立即创建本项目侧任务
 - 后台异步执行 prompts
+- 单条 prompt 超过 `CRAWLER_RECORD_TIMEOUT_SECONDS` 会强制终止并标记失败
 - 执行完成后回调 GEO-watcher
 
 立即响应：
@@ -293,6 +296,34 @@ repeat = 2
 ```
 
 第一版同一 crawler 服务只跑一个任务。以后有 5 台云手机后，再按实例 ID 做并发锁。
+
+## 超时和错误返回
+
+`POST /api/v1/tasks/{platform_id}` 是异步入队接口，正常只返回任务已接收，不等待真实爬取完成。
+
+错误检测分两层：
+
+- 入队前错误：鉴权失败、平台不存在、请求体非法，直接返回 HTTP `401/403/404/422`
+- 执行中错误：ADB 连接失败、App 卡住、UI 找不到、单条 prompt 超时，写入任务状态文件
+
+执行中错误通过下面接口查询：
+
+```http
+GET /api/v1/tasks/{crawler_task_id}
+GET /api/v1/tasks/{crawler_task_id}/results
+```
+
+返回里看这些字段：
+
+```json
+{
+  "status": "failed",
+  "failed_records": 1,
+  "error": "Crawler record timed out after 300s: platform=doubao, instance_id=acp-xxx"
+}
+```
+
+这样 GEO-watcher 不应该等 POST 阻塞完成，而是按 `task_id` 轮询或等待 callback。
 
 ## 回调 GEO-watcher
 
@@ -509,14 +540,15 @@ docker network inspect wuying-crawler-shared
 4. 新增 `POST /api/v1/tasks/{platform_id}`
 5. 新增本地任务状态文件：`data/tasks/*.json`
 6. 后台异步调用现有 workflow
-7. 新增 `geo_watcher_payload.py`，把内部结果转成 GEO-watcher callback JSON 数组
-8. 指标字段第一版先写 mock 值，后续替换真实计算逻辑
-9. 按 `env.callback_url` 和 `env.callback_api_key` 回调上传
-10. 新增 `/health`
-11. 写 Dockerfile / docker-compose
-12. GEO-watcher `backend` 实际加入 `wuying-crawler-shared`
-13. GEO-watcher `CRAWLER_PLATFORM_ENDPOINTS` 合并本项目完整 URL，不要覆盖项目 A 配置
-14. GEO-watcher 后台创建 `wuying-*` 平台 ID，并绑定用户、关键词和任务
+7. 单条 prompt 使用子进程执行，按 `CRAWLER_RECORD_TIMEOUT_SECONDS` 做硬超时
+8. 新增 `geo_watcher_payload.py`，把内部结果转成 GEO-watcher callback JSON 数组
+9. 指标字段第一版先写 mock 值，后续替换真实计算逻辑
+10. 按 `env.callback_url` 和 `env.callback_api_key` 回调上传
+11. 新增 `/health`
+12. 写 Dockerfile / docker-compose
+13. GEO-watcher `backend` 实际加入 `wuying-crawler-shared`
+14. GEO-watcher `CRAWLER_PLATFORM_ENDPOINTS` 合并本项目完整 URL，不要覆盖项目 A 配置
+15. GEO-watcher 后台创建 `wuying-*` 平台 ID，并绑定用户、关键词和任务
 
 ## 关键原则
 

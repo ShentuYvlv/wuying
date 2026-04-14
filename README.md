@@ -41,6 +41,7 @@
 SCRAPER_API_KEY=your-crawler-api-key
 CRAWLER_CALLBACK_URL=http://geo-watcher-backend:3005/api/integrations/crawler/uploads
 CRAWLER_CALLBACK_API_KEY=your-callback-api-key
+CRAWLER_RECORD_TIMEOUT_SECONDS=300
 WUYING_MANUAL_ADB_ENDPOINT=106.14.114.146:100
 WUYING_INSTANCE_IDS=acp-xxxxxxxxxxxxxxxx
 ADB_PATH=E:\all code\C一念\wuying\platform-tools\adb.exe
@@ -105,6 +106,12 @@ Invoke-RestMethod `
   -Uri "http://127.0.0.1:8000/api/v1/tasks/<task_id>/results" `
   -Headers @{ "x-api-key" = "your-crawler-api-key" }
 ```
+
+任务超时：
+
+- `POST /api/v1/tasks/{platform_id}` 是异步入队，只表示任务已接收。
+- 单条 prompt 的硬超时由 `CRAWLER_RECORD_TIMEOUT_SECONDS` 控制，默认 `300` 秒。
+- 超时后该条会标记为失败，`GET /api/v1/tasks/<task_id>` 和 `/results` 会返回 `status/error/failed_records`。
 
 支持的 API 平台 ID：
 

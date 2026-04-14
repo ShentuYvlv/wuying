@@ -83,11 +83,57 @@ class U2Driver:
             target.clear_text()
         except Exception:
             pass
-        target.set_text(text)
+        try:
+            target.set_text(text)
+        except Exception as exc:
+            logger.debug("uiautomator2 object set_text failed; trying clipboard paste: %s", exc)
+
+        if self.wait_for_input_text(text, timeout_seconds=2):
+            return
+
+        logger.info("set_text did not update focused input; trying clipboard paste fallback.")
+        target.click()
+        try:
+            self.device.send_keys(text, clear=True)
+        except Exception as exc:
+            raise U2DriverError("Failed to paste text into focused input.") from exc
+
+        if not self.wait_for_input_text(text, timeout_seconds=3):
+            raise U2DriverError("Text input was not written after set_text and clipboard paste fallback.")
 
     def click(self, selectors: list[SelectorSpec], timeout_seconds: int = 30) -> None:
         target = self.wait_for_any(selectors, timeout_seconds)
         target.click()
+
+    def wait_for_text(self, text: str, *, timeout_seconds: int) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        expected = self._normalize_for_match(text)
+        if not expected:
+            return True
+        while time.monotonic() < deadline:
+            root = self.dump_hierarchy_root()
+            for node in root.iter("node"):
+                current = self._normalize_for_match(node.attrib.get("text", ""))
+                if current and (expected in current or current in expected):
+                    return True
+            time.sleep(self.FIND_POLL_INTERVAL_SECONDS)
+        return False
+
+    def wait_for_input_text(self, text: str, *, timeout_seconds: int) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        expected = self._normalize_for_match(text)
+        if not expected:
+            return True
+        while time.monotonic() < deadline:
+            root = self.dump_hierarchy_root()
+            for node in root.iter("node"):
+                if node.attrib.get("class") != "android.widget.EditText":
+                    continue
+                current = self._normalize_for_match(node.attrib.get("text", ""))
+                if current and (expected in current or current in expected):
+                    return True
+            time.sleep(self.FIND_POLL_INTERVAL_SECONDS)
+        return False
 
     def swipe_up(self, start_ratio: float = 0.82, end_ratio: float = 0.28, x_ratio: float = 0.5) -> None:
         try:
@@ -282,6 +328,10 @@ class U2Driver:
             if isinstance(result, str) and result.strip():
                 return result.strip()
         return ""
+
+    @staticmethod
+    def _normalize_for_match(value: str) -> str:
+        return re.sub(r"\s+", "", value).strip()
 
     @staticmethod
     def _parse_bounds(value: str) -> tuple[int, int, int, int] | None:
