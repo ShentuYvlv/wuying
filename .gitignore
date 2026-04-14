@@ -7,6 +7,9 @@ __pycache__/
 *.so
 *.apk
 
+data/tasks/
+data/callback_payloads/
+
 a_Scraping_ChatGPT_Web_main/memory
 # Sensitive runtime session/auth files
 a_Scraping_ChatGPT_Web_main/doubao-playwright/auth.json

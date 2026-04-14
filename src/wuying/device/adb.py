@@ -23,6 +23,7 @@ class AdbClient:
         command = [self.settings.adb_path, "connect", endpoint.serial]
         result = self._run(command, timeout=self.settings.adb_connect_timeout_seconds)
         logger.info("adb connect output for %s: %s", endpoint.serial, result)
+        self._raise_if_connect_failed(endpoint.serial, result)
         return endpoint.serial
 
     def disconnect(self, serial: str) -> None:
@@ -100,7 +101,23 @@ class AdbClient:
             raise AdbError(
                 f"Command failed: {' '.join(command)}\nstdout={stdout}\nstderr={stderr}"
             ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise AdbError(f"Command timed out after {timeout}s: {' '.join(command)}") from exc
         return (completed.stdout or completed.stderr or "").strip()
+
+    @staticmethod
+    def _raise_if_connect_failed(serial: str, output: str) -> None:
+        normalized = output.lower()
+        failed_markers = (
+            "failed to connect",
+            "unable to connect",
+            "cannot connect",
+            "connection refused",
+            "no route to host",
+            "timed out",
+        )
+        if any(marker in normalized for marker in failed_markers):
+            raise AdbError(f"adb connect failed for {serial}: {output}")
 
     def _resolve_adb_vendor_keys(self) -> str | None:
         if self.settings.adb_vendor_keys:

@@ -1,0 +1,36 @@
+services:
+  wuying-crawler:
+    build: .
+    container_name: wuying-crawler
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      SCRAPER_API_KEY: ${SCRAPER_API_KEY}
+      CRAWLER_CALLBACK_URL: ${CRAWLER_CALLBACK_URL}
+      CRAWLER_CALLBACK_API_KEY: ${CRAWLER_CALLBACK_API_KEY}
+      WUYING_MANUAL_ADB_ENDPOINT: ${WUYING_MANUAL_ADB_ENDPOINT}
+      WUYING_INSTANCE_IDS: ${WUYING_INSTANCE_IDS}
+      WUYING_START_ADB_VIA_API: ${WUYING_START_ADB_VIA_API:-false}
+      WUYING_REGION_ID: ${WUYING_REGION_ID:-cn-shanghai}
+      WUYING_ENDPOINT: ${WUYING_ENDPOINT:-}
+      ALIBABA_CLOUD_ACCESS_KEY_ID: ${ALIBABA_CLOUD_ACCESS_KEY_ID:-}
+      ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${ALIBABA_CLOUD_ACCESS_KEY_SECRET:-}
+      ADB_PATH: /usr/bin/adb
+      ADB_VENDOR_KEYS: /app/platform-tools/adbkey
+    volumes:
+      - ./data:/app/data
+      - ./platform-tools:/app/platform-tools
+    networks:
+      wuying-internal: {}
+      wuying-crawler-shared:
+        aliases:
+          - ${WUYING_CRAWLER_ALIAS:-wuying-crawler}
+
+networks:
+  wuying-internal:
+    driver: bridge
+
+  wuying-crawler-shared:
+    external: true
+    name: ${WUYING_SHARED_NETWORK:-wuying-crawler-shared}
