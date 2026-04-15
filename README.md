@@ -133,6 +133,34 @@ Invoke-RestMethod `
 
 生产环境建议不要暴露 `8000` 到公网。GEO-watcher backend 和本项目通过 Docker external network 通信。
 
+服务器启动前必须创建 `.env`：
+
+```bash
+cp .env.example .env
+```
+
+至少填写：
+
+```env
+SCRAPER_API_KEY=<必须等于 GEO-watcher 的 CRAWLER_API_KEY>
+CRAWLER_CALLBACK_URL=http://geo-watcher-backend:3005/api/integrations/crawler/uploads
+CRAWLER_CALLBACK_API_KEY=<必须等于 GEO-watcher backend 的 CRAWLER_CALLBACK_API_KEY>
+WUYING_MANUAL_ADB_ENDPOINT=106.14.114.146:100
+WUYING_INSTANCE_IDS=acp-xxxxxxxxxxxxxxxx
+WUYING_START_ADB_VIA_API=false
+WUYING_SHARED_NETWORK=wuying-crawler-shared
+WUYING_CRAWLER_ALIAS=wuying-crawler
+```
+
+如果启动时看到下面这种 warning，说明 `.env` 没创建或没填：
+
+```text
+The "SCRAPER_API_KEY" variable is not set. Defaulting to a blank string.
+The "WUYING_MANUAL_ADB_ENDPOINT" variable is not set. Defaulting to a blank string.
+```
+
+这不是 Docker build 失败，是容器运行配置缺失。
+
 GEO-watcher 调用地址示例：
 
 ```env

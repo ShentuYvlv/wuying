@@ -67,6 +67,42 @@ ensure_external_networks() {
   ensure_network "$(read_env_value WUYING_SHARED_NETWORK wuying-crawler-shared)"
 }
 
+validate_required_env() {
+  local missing=()
+  local key
+
+  for key in \
+    SCRAPER_API_KEY \
+    WUYING_INSTANCE_IDS \
+    CRAWLER_CALLBACK_URL \
+    CRAWLER_CALLBACK_API_KEY
+  do
+    if [[ -z "$(read_env_value "$key" "")" ]]; then
+      missing+=("$key")
+    fi
+  done
+
+  local manual_adb_endpoint
+  local access_key_id
+  local access_key_secret
+  manual_adb_endpoint="$(read_env_value WUYING_MANUAL_ADB_ENDPOINT "")"
+  access_key_id="$(read_env_value ALIBABA_CLOUD_ACCESS_KEY_ID "")"
+  access_key_secret="$(read_env_value ALIBABA_CLOUD_ACCESS_KEY_SECRET "")"
+  if [[ -z "$manual_adb_endpoint" && ( -z "$access_key_id" || -z "$access_key_secret" ) ]]; then
+    missing+=("WUYING_MANUAL_ADB_ENDPOINT 或 ALIBABA_CLOUD_ACCESS_KEY_ID/ALIBABA_CLOUD_ACCESS_KEY_SECRET")
+  fi
+
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  echo ">>> 启动配置不完整，请先创建并填写 ${COMPOSE_ENV_FILE}" >&2
+  echo ">>> 缺少配置:" >&2
+  printf '  - %s\n' "${missing[@]}" >&2
+  echo ">>> 可先执行: cp .env.example .env" >&2
+  return 1
+}
+
 clean_for_compose_v1() {
   if [[ "${COMPOSE_IS_V1:-0}" -eq 1 ]]; then
     echo "检测到 docker-compose v1，执行兼容清理..."
@@ -83,17 +119,30 @@ clean_for_compose_v1() {
 
 health_check() {
   local service_name="${WUYING_CRAWLER_SERVICE:-wuying-crawler}"
+  local attempts="${WUYING_HEALTH_ATTEMPTS:-30}"
+  local interval_seconds="${WUYING_HEALTH_INTERVAL_SECONDS:-2}"
+  local i
+
   echo ">>> 检查服务健康状态"
-  if compose exec -T "$service_name" python - <<'PY' >/dev/null 2>&1
+
+  for ((i = 1; i <= attempts; i++)); do
+    if compose exec -T "$service_name" python - <<'PY' >/dev/null 2>&1
 from urllib.request import urlopen
 print(urlopen("http://127.0.0.1:8000/health", timeout=5).read().decode())
 PY
-  then
-    echo ">>> 服务健康检查通过"
-  else
-    echo ">>> 服务健康检查失败，可执行 ./start.sh logs 查看日志" >&2
-    return 1
-  fi
+    then
+      echo ">>> 服务健康检查通过"
+      return 0
+    fi
+
+    echo ">>> 健康检查未通过，等待重试 ${i}/${attempts}"
+    sleep "$interval_seconds"
+  done
+
+  echo ">>> 服务健康检查失败，可执行 ./start.sh logs 查看日志" >&2
+  compose ps >&2 || true
+  compose logs --tail=120 "$service_name" >&2 || true
+  return 1
 }
 
 usage() {
@@ -120,6 +169,7 @@ detect_compose
 
 case "$CMD" in
   up)
+    validate_required_env
     ensure_external_networks
     clean_for_compose_v1
     compose build
@@ -130,6 +180,7 @@ case "$CMD" in
     compose down "$@"
     ;;
   restart)
+    validate_required_env
     ensure_external_networks
     clean_for_compose_v1
     compose down --remove-orphans "$@" || true
