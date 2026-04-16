@@ -19,6 +19,21 @@
 .\platform-tools\adb.exe devices -l
 ```
 
+前提：
+
+- 不管是单机模式还是设备池模式，云手机实例都要先绑定密钥对
+- 本地要有该密钥对对应的 `adbkey` 文件
+- 如果 5 台手机绑定的是同一个密钥对，直接共用同一个 `ADB_VENDOR_KEYS`/`adbkey` 即可，不需要每台单独配
+- 按官方文档，密钥或 `adbkey` 刚变更后要先执行一次 `adb kill-server` 再 `adb start-server`
+- 手工执行 `.\platform-tools\adb.exe connect ...` 时，ADB 默认只读 `%USERPROFILE%\.android\adbkey`
+- 如果你的 `adbkey` 放在项目目录里，手工测试前要先在当前 shell 设置：
+
+```powershell
+$env:ADB_VENDOR_KEYS="E:\all code\C一念\wuying\platform-tools\adbkey"
+.\platform-tools\adb.exe kill-server
+.\platform-tools\adb.exe start-server
+```
+
 再用统一脚本入口：
 
 ```powershell
@@ -59,6 +74,7 @@
 说明：
 
 - 设备池默认配置文件是 [device_pool.json](E:/all code/C一念/wuying/config/device_pool.json)
+- 设备池只区分 `device_id / instance_id / adb_endpoint`，不单独配置密钥对；密钥对和 `adbkey` 继续走全局 `.env`
 - 执行顺序固定是：`平台 -> prompt -> 设备并发`
 - 同一平台同一条 prompt 下，多台手机结果会汇总到 `data/batches/<task_id>/<platform>/repeat_xxx_prompt_xxx.json`
 
@@ -77,6 +93,10 @@ CRAWLER_BATCH_TIMEOUT_SECONDS=3600
 CRAWLER_BATCH_MAX_WORKERS=5
 WUYING_MANUAL_ADB_ENDPOINT=106.14.114.146:100
 WUYING_INSTANCE_IDS=acp-xxxxxxxxxxxxxxxx
+WUYING_REGION_ID=cn-shanghai
+WUYING_ENDPOINT=
+WUYING_KEY_PAIR_ID=kp-xxxxxxxxxxxxxxxx
+WUYING_AUTO_ATTACH_KEY_PAIR=false
 ADB_PATH=E:\all code\C一念\wuying\platform-tools\adb.exe
 ADB_VENDOR_KEYS=E:\all code\C一念\wuying\platform-tools\adbkey
 WUYING_START_ADB_VIA_API=false
@@ -219,6 +239,9 @@ CRAWLER_CALLBACK_URL=http://geo-watcher-backend:3005/api/integrations/crawler/up
 CRAWLER_CALLBACK_API_KEY=<必须等于 GEO-watcher backend 的 CRAWLER_CALLBACK_API_KEY>
 WUYING_MANUAL_ADB_ENDPOINT=106.14.114.146:100
 WUYING_INSTANCE_IDS=acp-xxxxxxxxxxxxxxxx
+WUYING_REGION_ID=cn-shanghai
+WUYING_KEY_PAIR_ID=kp-xxxxxxxxxxxxxxxx
+ADB_VENDOR_KEYS=/app/platform-tools/adbkey
 WUYING_START_ADB_VIA_API=false
 WUYING_SHARED_NETWORK=wuying-crawler-shared
 WUYING_CRAWLER_ALIAS=wuying-crawler

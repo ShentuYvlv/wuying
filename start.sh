@@ -70,10 +70,12 @@ ensure_external_networks() {
 validate_required_env() {
   local missing=()
   local key
+  local device_pool_file
+  local device_pool_has_enabled=0
+  local device_pool_has_adb_endpoint=0
 
   for key in \
     SCRAPER_API_KEY \
-    WUYING_INSTANCE_IDS \
     CRAWLER_CALLBACK_URL \
     CRAWLER_CALLBACK_API_KEY
   do
@@ -82,14 +84,67 @@ validate_required_env() {
     fi
   done
 
+  device_pool_file="$(read_env_value DEVICE_POOL_FILE config/device_pool.json)"
+  if [[ -n "$device_pool_file" && -f "$device_pool_file" ]]; then
+    if python - "$device_pool_file" <<'PY' >/dev/null 2>&1
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+
+enabled = [
+    item for item in data
+    if isinstance(item, dict) and bool(item.get("enabled", True))
+]
+raise SystemExit(0 if enabled else 1)
+PY
+    then
+      device_pool_has_enabled=1
+    fi
+
+    if python - "$device_pool_file" <<'PY' >/dev/null 2>&1
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+
+for item in data:
+    if not isinstance(item, dict):
+        continue
+    if not bool(item.get("enabled", True)):
+        continue
+    adb_endpoint = str(item.get("adb_endpoint") or "").strip()
+    if adb_endpoint:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+    then
+      device_pool_has_adb_endpoint=1
+    fi
+  fi
+
+  if [[ -z "$(read_env_value WUYING_INSTANCE_IDS "")" && "$device_pool_has_enabled" -eq 0 ]]; then
+    missing+=("WUYING_INSTANCE_IDS 或 DEVICE_POOL_FILE(至少一台 enabled 设备)")
+  fi
+
   local manual_adb_endpoint
   local access_key_id
   local access_key_secret
   manual_adb_endpoint="$(read_env_value WUYING_MANUAL_ADB_ENDPOINT "")"
   access_key_id="$(read_env_value ALIBABA_CLOUD_ACCESS_KEY_ID "")"
   access_key_secret="$(read_env_value ALIBABA_CLOUD_ACCESS_KEY_SECRET "")"
-  if [[ -z "$manual_adb_endpoint" && ( -z "$access_key_id" || -z "$access_key_secret" ) ]]; then
-    missing+=("WUYING_MANUAL_ADB_ENDPOINT 或 ALIBABA_CLOUD_ACCESS_KEY_ID/ALIBABA_CLOUD_ACCESS_KEY_SECRET")
+  if [[ -z "$manual_adb_endpoint" && "$device_pool_has_adb_endpoint" -eq 0 && ( -z "$access_key_id" || -z "$access_key_secret" ) ]]; then
+    missing+=("WUYING_MANUAL_ADB_ENDPOINT 或 设备池 adb_endpoint 或 ALIBABA_CLOUD_ACCESS_KEY_ID/ALIBABA_CLOUD_ACCESS_KEY_SECRET")
   fi
 
   if [[ "${#missing[@]}" -eq 0 ]]; then

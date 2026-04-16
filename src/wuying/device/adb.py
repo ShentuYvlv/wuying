@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 from wuying.config import DeviceSettings
@@ -16,12 +17,38 @@ class AdbError(RuntimeError):
 
 
 class AdbClient:
+    _server_lock = threading.Lock()
+    _server_started = False
+
     def __init__(self, settings: DeviceSettings) -> None:
         self.settings = settings
 
     def connect(self, endpoint: AdbEndpoint) -> str:
+        self.ensure_server()
+        if self.is_connected(endpoint.serial):
+            logger.info("ADB serial %s is already connected; skipping adb connect", endpoint.serial)
+            return endpoint.serial
         command = [self.settings.adb_path, "connect", endpoint.serial]
-        result = self._run(command, timeout=self.settings.adb_connect_timeout_seconds)
+        try:
+            result = self._run(command, timeout=self.settings.adb_connect_timeout_seconds)
+        except AdbError as exc:
+            if self.is_connected(endpoint.serial):
+                logger.warning(
+                    "adb connect reported failure for %s, but the serial is already present in adb devices; reusing it",
+                    endpoint.serial,
+                )
+                return endpoint.serial
+            if self._has_authentication_failure(str(exc)):
+                logger.warning(
+                    "adb connect authentication failed for %s; restarting adb server with configured vendor keys and retrying once",
+                    endpoint.serial,
+                )
+                self.ensure_server(force_restart=True)
+                result = self._run(command, timeout=self.settings.adb_connect_timeout_seconds)
+                logger.info("adb connect output for %s after restart: %s", endpoint.serial, result)
+                self._raise_if_connect_failed(endpoint.serial, result)
+                return endpoint.serial
+            raise
         logger.info("adb connect output for %s: %s", endpoint.serial, result)
         self._raise_if_connect_failed(endpoint.serial, result)
         return endpoint.serial
@@ -78,6 +105,34 @@ class AdbClient:
             timeout=timeout_seconds,
         )
 
+    def ensure_server(self, *, force_restart: bool = False) -> None:
+        with self._server_lock:
+            if force_restart:
+                self._run([self.settings.adb_path, "kill-server"], timeout=20)
+                self._server_started = False
+            if self._server_started and not force_restart:
+                return
+            self._run([self.settings.adb_path, "start-server"], timeout=20)
+            self._server_started = True
+
+    def list_devices(self) -> dict[str, str]:
+        self.ensure_server()
+        output = self._run([self.settings.adb_path, "devices"], timeout=15)
+        devices: dict[str, str] = {}
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("List of devices attached"):
+                continue
+            if "\t" not in line:
+                continue
+            serial, state = line.split("\t", 1)
+            devices[serial.strip()] = state.strip()
+        return devices
+
+    def is_connected(self, serial: str) -> bool:
+        state = self.list_devices().get(serial)
+        return state == "device"
+
     def install_apk(
         self,
         serial: str,
@@ -109,21 +164,23 @@ class AdbClient:
                 command,
                 check=True,
                 capture_output=True,
-                text=True,
+                text=False,
                 timeout=timeout,
                 env=env,
             )
         except FileNotFoundError as exc:
             raise AdbError(f"adb not found: {self.settings.adb_path}") from exc
         except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()
-            stdout = (exc.stdout or "").strip()
+            stderr = self._decode_output(exc.stderr).strip()
+            stdout = self._decode_output(exc.stdout).strip()
             raise AdbError(
                 f"Command failed: {' '.join(command)}\nstdout={stdout}\nstderr={stderr}"
             ) from exc
         except subprocess.TimeoutExpired as exc:
             raise AdbError(f"Command timed out after {timeout}s: {' '.join(command)}") from exc
-        return (completed.stdout or completed.stderr or "").strip()
+        stdout = self._decode_output(completed.stdout).strip()
+        stderr = self._decode_output(completed.stderr).strip()
+        return stdout or stderr or ""
 
     @staticmethod
     def _raise_if_connect_failed(serial: str, output: str) -> None:
@@ -152,3 +209,21 @@ class AdbClient:
             return str(candidate.resolve())
 
         return None
+
+    @staticmethod
+    def _decode_output(raw: bytes | str | None) -> str:
+        if raw is None:
+            return ""
+        if isinstance(raw, str):
+            return raw
+        for encoding in ("utf-8", "gbk", "utf-16"):
+            try:
+                return raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _has_authentication_failure(message: str) -> bool:
+        normalized = message.lower()
+        return "failed to authenticate" in normalized or "authentication failed" in normalized

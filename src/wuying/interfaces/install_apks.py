@@ -114,6 +114,7 @@ def _install_to_devices(
 ) -> list[dict[str, object]]:
     adb = AdbClient(settings.device)
     api = WuyingApiClient(settings.aliyun)
+    adb.ensure_server()
     max_workers = max(1, min(len(devices), settings.batch_max_workers))
     results: list[dict[str, object]] = []
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="apk-install") as executor:
@@ -144,39 +145,47 @@ def _install_to_one_device(
     grant_permissions: bool,
     timeout_seconds: int,
 ) -> dict[str, object]:
-    endpoint = _resolve_endpoint(api=api, device=device, adb_ready_timeout_seconds=adb.settings.adb_ready_timeout_seconds)
-    serial = adb.connect(endpoint)
-    adb.wait_for_device(serial, timeout_seconds=adb.settings.adb_ready_timeout_seconds)
-
     installs: list[dict[str, object]] = []
     status = "succeeded"
     error: str | None = None
-    for apk_path in apk_paths:
-        try:
-            output = adb.install_apk(
-                serial,
-                apk_path,
-                grant_permissions=grant_permissions,
-                timeout_seconds=timeout_seconds,
-            )
-            installs.append(
-                {
-                    "apk": str(apk_path),
-                    "status": "succeeded",
-                    "output": output,
-                }
-            )
-        except Exception as exc:
-            status = "failed"
-            error = str(exc)
-            installs.append(
-                {
-                    "apk": str(apk_path),
-                    "status": "failed",
-                    "error": str(exc),
-                }
-            )
-            break
+    try:
+        endpoint = _resolve_endpoint(
+            api=api,
+            device=device,
+            adb_ready_timeout_seconds=adb.settings.adb_ready_timeout_seconds,
+        )
+        serial = adb.connect(endpoint)
+        adb.wait_for_device(serial, timeout_seconds=adb.settings.adb_ready_timeout_seconds)
+
+        for apk_path in apk_paths:
+            try:
+                output = adb.install_apk(
+                    serial,
+                    apk_path,
+                    grant_permissions=grant_permissions,
+                    timeout_seconds=timeout_seconds,
+                )
+                installs.append(
+                    {
+                        "apk": str(apk_path),
+                        "status": "succeeded",
+                        "output": output,
+                    }
+                )
+            except Exception as exc:
+                status = "failed"
+                error = str(exc)
+                installs.append(
+                    {
+                        "apk": str(apk_path),
+                        "status": "failed",
+                        "error": str(exc),
+                    }
+                )
+                break
+    except Exception as exc:
+        status = "failed"
+        error = str(exc)
 
     return {
         "device_id": device.device_id,
