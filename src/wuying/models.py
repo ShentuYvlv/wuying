@@ -117,6 +117,7 @@ class ReferenceData:
 class PlatformRunResult:
     platform: str
     instance_id: str
+    device_id: str | None
     prompt: str
     response: str
     adb_serial: str
@@ -130,6 +131,7 @@ class PlatformRunResult:
         return {
             "platform": self.platform,
             "instance_id": self.instance_id,
+            "device_id": self.device_id,
             "prompt": self.prompt,
             "response": self.response,
             "adb_serial": self.adb_serial,
@@ -146,6 +148,7 @@ class PlatformRunResult:
         *,
         platform: str,
         instance_id: str,
+        device_id: str | None,
         prompt: str,
         response: str,
         adb_serial: str,
@@ -158,6 +161,7 @@ class PlatformRunResult:
         return cls(
             platform=platform,
             instance_id=instance_id,
+            device_id=device_id,
             prompt=prompt,
             response=response,
             adb_serial=adb_serial,

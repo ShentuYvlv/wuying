@@ -17,4 +17,4 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["python", "run_api.py"]
+CMD ["python", "run.py", "api"]

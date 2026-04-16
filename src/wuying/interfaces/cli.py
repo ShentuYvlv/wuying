@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
+from wuying.application.batch_models import BatchTaskRequest
+from wuying.application.batch_runner import resolve_batch_devices, run_batch_job
+from wuying.application.device_lease import DeviceLeaseError, DeviceLeaseManager
 from wuying.application.platform_registry import PLATFORM_REGISTRY, available_platform_names, get_platform_definition
-from wuying.application.runner import pick_default_instance, run_platform_once
 from wuying.config import AppSettings
 from wuying.logging_utils import configure_logging
 
@@ -19,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Platform name, or comma-separated names. Available: {', '.join(available_platform_names())}",
     )
     parser.add_argument("--instance-id", help="Override one instance ID from .env")
+    parser.add_argument("--devices", help="Comma-separated device IDs from config/device_pool.json")
     prompt_source = parser.add_mutually_exclusive_group(required=True)
     prompt_source.add_argument("--prompt", help="Prompt sent to the selected app")
     prompt_source.add_argument("--file", help="UTF-8 text file. One non-empty line is one prompt.")
@@ -53,6 +59,28 @@ def _load_prompts(args: argparse.Namespace) -> list[str]:
     return prompts
 
 
+def _parse_devices(raw: str | None) -> list[str] | None:
+    if raw is None:
+        return None
+    devices = [item.strip() for item in raw.split(",") if item.strip()]
+    if not devices:
+        raise ValueError("No devices configured.")
+    return devices
+
+
+def _build_cli_task_id() -> str:
+    stamp = datetime.now(tz=UTC).strftime("%Y%m%d%H%M%S")
+    return f"cli-{stamp}-{uuid4().hex[:8]}"
+
+
+def _get_record_timeout_seconds() -> int:
+    raw = os.getenv("CRAWLER_RECORD_TIMEOUT_SECONDS", "300").strip()
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"CRAWLER_RECORD_TIMEOUT_SECONDS must be an integer, got {raw!r}") from exc
+
+
 def run_from_cli(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -62,12 +90,33 @@ def run_from_cli(argv: list[str] | None = None) -> int:
     try:
         platforms = _parse_platforms(args.platform)
         prompts = _load_prompts(args)
+        device_ids = _parse_devices(args.devices)
     except Exception as exc:
         parser.error(str(exc))
 
     configure_logging()
     settings = AppSettings.from_env()
-    instance_id = args.instance_id or pick_default_instance(settings)
+    batch_request = BatchTaskRequest(
+        platforms=platforms,
+        prompts=prompts,
+        repeat=1,
+        save_name=None,
+        env={},
+        device_ids=device_ids,
+        legacy_instance_id=args.instance_id,
+        default_to_all_pool_devices=True,
+    )
+    devices = resolve_batch_devices(settings, batch_request)
+    task_id = _build_cli_task_id()
+    lease_manager = DeviceLeaseManager(
+        settings.device.device_lease_dir,
+        stale_after_seconds=settings.device.device_lease_ttl_seconds,
+    )
+    try:
+        lease_manager.acquire_many([device.device_id for device in devices], owner=task_id)
+    except DeviceLeaseError as exc:
+        parser.error(str(exc))
+
     print(
         json.dumps(
             {
@@ -76,29 +125,29 @@ def run_from_cli(argv: list[str] | None = None) -> int:
                     platform: PLATFORM_REGISTRY[platform].description
                     for platform in platforms
                 },
-                "instance_id": instance_id,
+                "instance_id": args.instance_id,
+                "device_ids": [device.device_id for device in devices],
+                "selected_devices": [device.to_dict() for device in devices],
                 "manual_adb_endpoint": settings.device.manual_adb_endpoint,
                 "adb_path": settings.device.adb_path,
                 "prompt_count": len(prompts),
+                "task_id": task_id,
             },
             ensure_ascii=False,
             indent=2,
         )
     )
 
-    results = []
-    for platform in platforms:
-        for prompt in prompts:
-            result = run_platform_once(
-                settings=settings,
-                platform_name=platform,
-                prompt=prompt,
-                instance_id=instance_id,
-            )
-            results.append(result.to_dict())
-
-    if len(results) == 1:
-        print(json.dumps(results[0], ensure_ascii=False, indent=2))
-    else:
-        print(json.dumps({"results": results}, ensure_ascii=False, indent=2))
+    try:
+        result = run_batch_job(
+            settings=settings,
+            task_id=task_id,
+            request=batch_request,
+            devices=devices,
+            record_timeout_seconds=_get_record_timeout_seconds(),
+            batch_timeout_seconds=settings.batch_timeout_seconds,
+        )
+    finally:
+        lease_manager.release_many([device.device_id for device in devices], owner=task_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

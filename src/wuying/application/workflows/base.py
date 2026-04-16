@@ -27,9 +27,16 @@ class ChatAppWorkflow(ABC):
     def api(self) -> WuyingApiClient:
         return WuyingApiClient(self.settings.aliyun)
 
-    def run_once(self, *, instance_id: str, prompt: str) -> PlatformRunResult:
+    def run_once(
+        self,
+        *,
+        instance_id: str,
+        prompt: str,
+        device_id: str | None = None,
+        adb_endpoint: str | None = None,
+    ) -> PlatformRunResult:
         started_at = datetime.now(tz=UTC)
-        endpoint = self._resolve_endpoint(instance_id)
+        endpoint = self._resolve_endpoint(instance_id, adb_endpoint=adb_endpoint)
         serial = self.adb.connect(endpoint)
         self.adb.wait_for_device(serial, timeout_seconds=self.settings.device.adb_ready_timeout_seconds)
 
@@ -52,10 +59,11 @@ class ChatAppWorkflow(ABC):
         extra = self._collect_extra_metadata(driver, prompt=prompt, response=response)
 
         finished_at = datetime.now(tz=UTC)
-        output_path = self._build_output_path(instance_id=instance_id, finished_at=finished_at)
+        output_path = self._build_output_path(instance_id=instance_id, device_id=device_id, finished_at=finished_at)
         result = PlatformRunResult.build(
             platform=self.platform_name,
             instance_id=instance_id,
+            device_id=device_id,
             prompt=prompt,
             response=response,
             adb_serial=serial,
@@ -68,14 +76,21 @@ class ChatAppWorkflow(ABC):
         logger.info("Saved result to %s", output_path)
         return result
 
-    def _build_output_path(self, *, instance_id: str, finished_at: datetime) -> Path:
+    def _build_output_path(
+        self,
+        *,
+        instance_id: str,
+        device_id: str | None,
+        finished_at: datetime,
+    ) -> Path:
         output_dir = self.app.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
         timestamp = finished_at.strftime("%Y%m%dT%H%M%SZ")
-        return output_dir / f"{self.platform_name}_{instance_id}_{timestamp}.json"
+        path_key = device_id or instance_id
+        return output_dir / f"{self.platform_name}_{path_key}_{timestamp}.json"
 
-    def _resolve_endpoint(self, instance_id: str) -> AdbEndpoint:
-        raw = self.settings.device.manual_adb_endpoint
+    def _resolve_endpoint(self, instance_id: str, *, adb_endpoint: str | None = None) -> AdbEndpoint:
+        raw = adb_endpoint or self.settings.device.manual_adb_endpoint
         if raw:
             if ":" not in raw:
                 raise ValueError(

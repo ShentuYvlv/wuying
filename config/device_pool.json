@@ -1,0 +1,21 @@
+[
+  {
+    "device_id": "北京",
+    "instance_id": "acp-hp8gertkygk1993ig",
+    "adb_endpoint": "39.96.12.199:100",
+    "enabled": true
+  },
+  {
+    "device_id": "上海",
+    "instance_id": "acp-2mme4unqueypy0xyd",
+    "adb_endpoint": "47.116.51.74:100",
+    "enabled": true
+  },
+  {
+    "device_id": "杭州",
+    "instance_id": "acp-hp8gertkyfqfsk9vn",
+    "adb_endpoint": "121.43.24.60:100",
+    "enabled": true
+  }
+
+]

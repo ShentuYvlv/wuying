@@ -11,6 +11,8 @@ data/tasks/
 data/callback_payloads/
 data/task_ipc/
 data/runs/
+data/batches/
+data/device_leases/
 platform-tools/api_*_dump.xml
 
 a_Scraping_ChatGPT_Web_main/memory

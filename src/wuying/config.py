@@ -46,6 +46,25 @@ def _resolve_wuying_endpoint(region_id: str, explicit_endpoint: str) -> str:
     return "eds-aic.cn-shanghai.aliyuncs.com"
 
 
+def _resolve_path(name: str, default: str = "") -> Path | None:
+    raw = _get_optional(name, default)
+    if not raw:
+        return None
+    return Path(raw)
+
+
+def _device_pool_has_enabled_entries(path: Path | None) -> bool:
+    if path is None or not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(data, list):
+        return False
+    return any(isinstance(item, dict) and bool(item.get("enabled", True)) for item in data)
+
+
 def _parse_selectors(name: str, fallback: list[SelectorSpec]) -> list[SelectorSpec]:
     raw = _get_optional(name)
     if not raw:
@@ -153,6 +172,9 @@ class DeviceSettings:
     adb_ready_timeout_seconds: int
     start_adb_via_api: bool
     manual_adb_endpoint: str | None
+    device_pool_file: Path | None
+    device_lease_dir: Path
+    device_lease_ttl_seconds: int
 
 
 @dataclass(slots=True)
@@ -177,6 +199,9 @@ class AppSettings:
     qianwen: ChatAppSettings
     yuanbao: ChatAppSettings
     instance_ids: list[str]
+    batch_output_dir: Path
+    batch_timeout_seconds: int
+    batch_max_workers: int
 
     @classmethod
     def from_env(cls) -> "AppSettings":
@@ -187,10 +212,11 @@ class AppSettings:
         aliyun_endpoint = _resolve_wuying_endpoint(region_id, explicit_endpoint)
 
         manual_adb_endpoint = _get_optional("WUYING_MANUAL_ADB_ENDPOINT") or None
+        device_pool_file = _resolve_path("DEVICE_POOL_FILE", "config/device_pool.json")
         access_key_id = _get_optional("ALIBABA_CLOUD_ACCESS_KEY_ID") or None
         access_key_secret = _get_optional("ALIBABA_CLOUD_ACCESS_KEY_SECRET") or None
 
-        if not manual_adb_endpoint:
+        if not manual_adb_endpoint and not _device_pool_has_enabled_entries(device_pool_file):
             if not access_key_id:
                 raise ValueError("Missing required environment variable: ALIBABA_CLOUD_ACCESS_KEY_ID")
             if not access_key_secret:
@@ -398,6 +424,9 @@ class AppSettings:
                 adb_ready_timeout_seconds=_get_int("ADB_READY_TIMEOUT_SECONDS", 120),
                 start_adb_via_api=_get_bool("WUYING_START_ADB_VIA_API", True),
                 manual_adb_endpoint=manual_adb_endpoint,
+                device_pool_file=device_pool_file,
+                device_lease_dir=_resolve_path("DEVICE_LEASE_DIR", "data/device_leases") or Path("data/device_leases"),
+                device_lease_ttl_seconds=_get_int("DEVICE_LEASE_TTL_SECONDS", 7200),
             ),
             doubao=_build_chat_app_settings(
                 env_prefix="DOUBAO",
@@ -455,4 +484,7 @@ class AppSettings:
                 default_selectors=yuanbao_defaults,
             ),
             instance_ids=_get_csv("WUYING_INSTANCE_IDS"),
+            batch_output_dir=_resolve_path("BATCH_OUTPUT_DIR", "data/batches") or Path("data/batches"),
+            batch_timeout_seconds=_get_int("CRAWLER_BATCH_TIMEOUT_SECONDS", 3600),
+            batch_max_workers=_get_int("CRAWLER_BATCH_MAX_WORKERS", 5),
         )

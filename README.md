@@ -22,14 +22,45 @@
 再用统一脚本入口：
 
 ```powershell
-.\venv\Scripts\python.exe .\run_app.py --platform doubao --prompt "你好，介绍一下你自己"
+.\venv\Scripts\python.exe .\run.py app --platform doubao --prompt "你好，介绍一下你自己"
 ```
 
 多平台和文件批量：
 
 ```powershell
-.\venv\Scripts\python.exe .\run_app.py --platform doubao,kimi --file .\data\prompts.txt
+.\venv\Scripts\python.exe .\run.py app --platform doubao,kimi --file .\data\prompts.txt
 ```
+
+多手机池执行：
+
+```powershell
+.\venv\Scripts\python.exe .\run.py app --platform doubao,deepseek,kimi --devices A,B,C --file .\data\prompts.txt
+```
+
+设备池批量装 APK：
+
+```powershell
+.\venv\Scripts\python.exe .\run.py install-apks --devices A,B,C
+```
+
+默认会把 [apk](E:/all code/C一念/wuying/apk) 目录下所有 `.apk` 依次安装到选中的设备上。
+如果你显式传目录也可以：
+
+```powershell
+.\venv\Scripts\python.exe .\run.py install-apks --apk .\apk\
+```
+
+只装指定 APK：
+
+```powershell
+.\venv\Scripts\python.exe .\run.py install-apks --devices A,B --apk deepseek.apk,com.aliyun.tongyi.apk
+```
+
+说明：
+
+- 设备池默认配置文件是 [device_pool.json](E:/all code/C一念/wuying/config/device_pool.json)
+- 执行顺序固定是：`平台 -> prompt -> 设备并发`
+- 同一平台同一条 prompt 下，多台手机结果会汇总到 `data/batches/<task_id>/<platform>/repeat_xxx_prompt_xxx.json`
 
 ## API 运行
 
@@ -42,17 +73,20 @@ SCRAPER_API_KEY=your-crawler-api-key
 CRAWLER_CALLBACK_URL=http://geo-watcher-backend:3005/api/integrations/crawler/uploads
 CRAWLER_CALLBACK_API_KEY=your-callback-api-key
 CRAWLER_RECORD_TIMEOUT_SECONDS=300
+CRAWLER_BATCH_TIMEOUT_SECONDS=3600
+CRAWLER_BATCH_MAX_WORKERS=5
 WUYING_MANUAL_ADB_ENDPOINT=106.14.114.146:100
 WUYING_INSTANCE_IDS=acp-xxxxxxxxxxxxxxxx
 ADB_PATH=E:\all code\C一念\wuying\platform-tools\adb.exe
 ADB_VENDOR_KEYS=E:\all code\C一念\wuying\platform-tools\adbkey
 WUYING_START_ADB_VIA_API=false
+DEVICE_POOL_FILE=config/device_pool.json
 ```
 
 启动 API：
 
 ```powershell
-.\venv\Scripts\python.exe .\run_api.py
+.\venv\Scripts\python.exe .\run.py api
 ```
 
 健康检查：
@@ -107,10 +141,48 @@ Invoke-RestMethod `
   -Headers @{ "x-api-key" = "your-crawler-api-key" }
 ```
 
+批任务接口：
+
+```powershell
+$headers = @{ "x-api-key" = "your-crawler-api-key" }
+$body = @{
+  platforms = @("doubao", "deepseek", "kimi")
+  prompts = @("你好，介绍一下你自己", "清明应该吃什么")
+  repeat = 1
+  device_ids = @("A", "B", "C")
+  save_name = "local_multi_device_batch"
+  env = @{}
+} | ConvertTo-Json -Depth 8
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v2/batches" `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+批任务查询：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/api/v2/batches/<task_id>" `
+  -Headers @{ "x-api-key" = "your-crawler-api-key" }
+```
+
+批任务结果：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/api/v2/batches/<task_id>/results" `
+  -Headers @{ "x-api-key" = "your-crawler-api-key" }
+```
+
 任务超时：
 
 - `POST /api/v1/tasks/{platform_id}` 是异步入队，只表示任务已接收。
 - 单条 prompt 的硬超时由 `CRAWLER_RECORD_TIMEOUT_SECONDS` 控制，默认 `300` 秒。
+- 整个批任务的总超时由 `CRAWLER_BATCH_TIMEOUT_SECONDS` 控制，默认 `3600` 秒。
 - 超时后该条会标记为失败，`GET /api/v1/tasks/<task_id>` 和 `/results` 会返回 `status/error/failed_records`。
 
 支持的 API 平台 ID：
@@ -210,7 +282,7 @@ CRAWLER_CALLBACK_URL=http://geo-watcher-backend:3005/api/integrations/crawler/up
    - 页面选择器
    - 回答附加信息提取
 4. 在 `src/wuying/application/platform_registry.py` 注册平台名
-5. 直接用 `run_app.py --platform xxx` 运行
+5. 直接用 `run.py app --platform xxx` 运行
 
 ## 关键配置
 

@@ -78,6 +78,26 @@ class AdbClient:
             timeout=timeout_seconds,
         )
 
+    def install_apk(
+        self,
+        serial: str,
+        apk_path: str | Path,
+        *,
+        replace: bool = True,
+        grant_permissions: bool = False,
+        timeout_seconds: int = 600,
+    ) -> str:
+        resolved = Path(apk_path)
+        if not resolved.exists():
+            raise AdbError(f"APK not found: {resolved}")
+        command = [self.settings.adb_path, "-s", serial, "install"]
+        if replace:
+            command.append("-r")
+        if grant_permissions:
+            command.append("-g")
+        command.append(str(resolved))
+        return self._run(command, timeout=timeout_seconds)
+
     def _run(self, command: list[str], *, timeout: int) -> str:
         env = os.environ.copy()
         adb_vendor_keys = self._resolve_adb_vendor_keys()
