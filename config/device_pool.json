@@ -16,6 +16,18 @@
     "instance_id": "acp-hp8gertkyfqfsk9vn",
     "adb_endpoint": "121.43.24.60:100",
     "enabled": true
+  },
+    {
+    "device_id": "深圳",
+    "instance_id": "acp-hp8gertkyid59ywp6",
+    "adb_endpoint": "120.79.156.12:100",
+    "enabled": true
+  },
+    {
+    "device_id": "杭州2",
+    "instance_id": "acp-2mme4unqugxr22x2o",
+    "adb_endpoint": "121.41.165.11:100",
+    "enabled": true
   }
 
 ]
