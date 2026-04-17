@@ -17,7 +17,7 @@
 - 启动实例 ADB
 - 获取 ADB 地址并 `adb connect`
 - 用 `uiautomator2` 打开豆包并执行一次问答
-- 输出结果到 `data/runs/*.json`
+- 批量/设备池模式输出结果到 `data/batches/<task_id>/doubao/repeat_xxx_prompt_xxx.json`
 
 ## 你现在最该做的事
 

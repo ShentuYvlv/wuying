@@ -323,7 +323,10 @@ class CrawlerTaskService:
                 },
             )
         finally:
-            self.lease_manager.release_many([device.device_id for device in devices], owner=task_id)
+            try:
+                self.lease_manager.release_many([device.device_id for device in devices], owner=task_id)
+            except Exception as exc:
+                logger.warning("Failed to release task device leases: task_id=%s error=%s", task_id, exc)
 
         callback_info = self._upload_callback(task)
         self.store.update(task_id, {"callback": callback_info})

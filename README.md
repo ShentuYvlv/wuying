@@ -77,6 +77,8 @@ $env:ADB_VENDOR_KEYS="E:\all code\C一念\wuying\platform-tools\adbkey"
 - 设备池只区分 `device_id / instance_id / adb_endpoint`，不单独配置密钥对；密钥对和 `adbkey` 继续走全局 `.env`
 - 执行顺序固定是：`平台 -> prompt -> 设备并发`
 - 同一平台同一条 prompt 下，多台手机结果会汇总到 `data/batches/<task_id>/<platform>/repeat_xxx_prompt_xxx.json`
+- `data/batches/<task_id>/summary.json` 只保存索引和状态，不重复保存完整回答
+- 批量模式不再额外写 `data/runs/*.json` 单机副本
 
 ## API 运行
 

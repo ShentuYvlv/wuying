@@ -4,6 +4,7 @@ import logging
 import re
 import time
 import xml.etree.ElementTree as ET
+from collections import Counter
 from typing import Any
 
 from wuying.models import SelectorSpec
@@ -262,12 +263,16 @@ class U2Driver:
         settle_seconds: int,
         message_root_resource_id: str | None = None,
         response_selectors: list[SelectorSpec] | None = None,
+        baseline: list[str] | None = None,
     ) -> str:
-        baseline = self.dump_text_nodes(
-            include_content_desc=False,
-            root_resource_id=message_root_resource_id,
-        )
-        logger.info("Captured %s baseline text nodes", len(baseline))
+        if baseline is None:
+            baseline = self.dump_text_nodes(
+                include_content_desc=False,
+                root_resource_id=message_root_resource_id,
+            )
+            logger.info("Captured %s baseline text nodes", len(baseline))
+        else:
+            logger.info("Using %s baseline text nodes captured before sending prompt", len(baseline))
 
         deadline = time.monotonic() + timeout_seconds
         last_candidate = ""
@@ -303,15 +308,20 @@ class U2Driver:
 
     @staticmethod
     def _pick_response_candidate(*, baseline: list[str], current: list[str], prompt: str) -> str:
-        baseline_set = set(baseline)
-        candidates = [
-            item
-            for item in current
-            if item not in baseline_set
-            and item.strip()
-            and item.strip() != prompt.strip()
-            and not U2Driver._looks_like_loading_response(item)
-        ]
+        baseline_counts = Counter(baseline)
+        current_counts: Counter[str] = Counter()
+        candidates: list[str] = []
+        for item in current:
+            current_counts[item] += 1
+            if current_counts[item] <= baseline_counts[item]:
+                continue
+            if not item.strip():
+                continue
+            if item.strip() == prompt.strip():
+                continue
+            if U2Driver._looks_like_loading_response(item):
+                continue
+            candidates.append(item)
         if not candidates:
             return ""
         candidates.sort(key=len, reverse=True)

@@ -257,6 +257,7 @@ def _run_device(
             prompt=prompt,
             device=device,
             timeout_seconds=record_timeout_seconds,
+            save_result=False,
         ).to_dict()
         finished_at = _utc_now()
         logger.info(
@@ -277,7 +278,7 @@ def _run_device(
             status="succeeded",
             started_at=started_at,
             finished_at=finished_at,
-            result_path=str(result.get("output_path") or ""),
+            result_path=str(result.get("output_path") or "") or None,
             result=result,
         )
     except TimeoutError as exc:
@@ -408,10 +409,45 @@ def _write_batch_summary(
         "started_at": started_at,
         "finished_at": finished_at,
         "error": error,
-        "platform_batches": platform_batches,
+        "platform_batches": [_compact_platform_batch(item) for item in platform_batches],
     }
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return output_path
+
+
+def _compact_platform_batch(batch: dict[str, object]) -> dict[str, object]:
+    return {
+        "platform": batch.get("platform"),
+        "prompt": batch.get("prompt"),
+        "prompt_index": batch.get("prompt_index"),
+        "repeat_index": batch.get("repeat_index"),
+        "device_ids": batch.get("device_ids", []),
+        "status": batch.get("status"),
+        "started_at": batch.get("started_at"),
+        "finished_at": batch.get("finished_at"),
+        "output_path": batch.get("output_path"),
+        "results": [
+            _compact_device_result(item)
+            for item in batch.get("results", [])
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def _compact_device_result(result: dict[str, object]) -> dict[str, object]:
+    return {
+        "device_id": result.get("device_id"),
+        "instance_id": result.get("instance_id"),
+        "adb_endpoint": result.get("adb_endpoint"),
+        "platform": result.get("platform"),
+        "prompt_index": result.get("prompt_index"),
+        "repeat_index": result.get("repeat_index"),
+        "status": result.get("status"),
+        "started_at": result.get("started_at"),
+        "finished_at": result.get("finished_at"),
+        "result_path": result.get("result_path"),
+        "error": result.get("error"),
+    }
 
 
 def _aggregate_device_status(device_results: list[DeviceRunRecord]) -> str:

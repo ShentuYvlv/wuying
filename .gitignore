@@ -13,6 +13,9 @@ data/task_ipc/
 data/runs/
 data/batches/
 data/device_leases/
+data/device_leases_debug*/
+data/debug_wuying*.xml
+.runtime/
 platform-tools/api_*_dump.xml
 
 a_Scraping_ChatGPT_Web_main/memory

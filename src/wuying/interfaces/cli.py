@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from datetime import UTC, datetime
@@ -15,19 +16,22 @@ from wuying.application.platform_registry import PLATFORM_REGISTRY, available_pl
 from wuying.config import AppSettings
 from wuying.logging_utils import configure_logging
 
+logger = logging.getLogger(__name__)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run prompts on selected mobile platform workflows.")
     parser.add_argument(
+        "-platform",
         "--platform",
         required=True,
         help=f"Platform name, or comma-separated names. Available: {', '.join(available_platform_names())}",
     )
-    parser.add_argument("--instance-id", help="Override one instance ID from .env")
-    parser.add_argument("--devices", help="Comma-separated device IDs from config/device_pool.json")
+    parser.add_argument("-instance-id", "--instance-id", help="Override one instance ID from .env")
+    parser.add_argument("-devices", "--devices", help="Comma-separated device IDs from config/device_pool.json")
     prompt_source = parser.add_mutually_exclusive_group(required=True)
-    prompt_source.add_argument("--prompt", help="Prompt sent to the selected app")
-    prompt_source.add_argument("--file", help="UTF-8 text file. One non-empty line is one prompt.")
+    prompt_source.add_argument("-prompt", "--prompt", help="Prompt sent to the selected app")
+    prompt_source.add_argument("-file", "--file", help="UTF-8 text file. One non-empty line is one prompt.")
     return parser
 
 
@@ -148,6 +152,9 @@ def run_from_cli(argv: list[str] | None = None) -> int:
             batch_timeout_seconds=settings.batch_timeout_seconds,
         )
     finally:
-        lease_manager.release_many([device.device_id for device in devices], owner=task_id)
+        try:
+            lease_manager.release_many([device.device_id for device in devices], owner=task_id)
+        except Exception as exc:
+            logger.warning("Failed to release CLI device leases: owner=%s error=%s", task_id, exc)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,6 +17,8 @@ from wuying.device.adb import AdbClient
 from wuying.invokers.aliyun import WuyingApiClient
 from wuying.logging_utils import configure_logging
 from wuying.models import AdbEndpoint
+
+logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -98,7 +101,10 @@ def run_install_from_cli(argv: list[str] | None = None) -> int:
             timeout_seconds=args.timeout_seconds,
         )
     finally:
-        lease_manager.release_many([device.device_id for device in devices], owner=lease_owner)
+        try:
+            lease_manager.release_many([device.device_id for device in devices], owner=lease_owner)
+        except Exception as exc:
+            logger.warning("Failed to release APK install device leases: owner=%s error=%s", lease_owner, exc)
 
     print(json.dumps({"results": results}, ensure_ascii=False, indent=2))
     return 0 if all(item["status"] == "succeeded" for item in results) else 1

@@ -379,7 +379,7 @@ files
       "keywords": [],
       "items": []
     },
-    "raw_output_path": "data/runs/doubao_acp-xxx_20260414T000000Z.json"
+    "raw_output_path": ""
   },
   {
     "attitude": 92
@@ -424,14 +424,13 @@ POST /api/v1/tasks/{platform_id}
 
 ## 结果 JSON 保存改造
 
-当前 `data/runs/*.json` 是本项目内部原始结果，不一定满足 GEO-watcher 指标入库字段。
+当前批量模式的完整结果保存在 `data/batches/<task_id>/<platform>/repeat_xxx_prompt_xxx.json`。
 
-需要新增一层“上传文件 JSON”生成逻辑：
+callback 上传仍然单独生成 GEO-watcher 需要的 JSON 数组：
 
 ```text
-data/runs/*.json
-  -> 读取内部原始结果
-  -> 转成 GEO-watcher callback JSON 数组
+data/batches/<task_id>/<platform>/repeat_xxx_prompt_xxx.json
+  -> 从任务内存结果转成 GEO-watcher callback JSON 数组
   -> 保存到 data/callback_payloads/*.json
   -> multipart/form-data 上传到 callback_url
 ```

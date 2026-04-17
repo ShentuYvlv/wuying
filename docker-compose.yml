@@ -25,7 +25,7 @@ services:
       ADB_PATH: /usr/bin/adb
       ADB_VENDOR_KEYS: ${ADB_VENDOR_KEYS:-/app/platform-tools/adbkey}
       DEVICE_POOL_FILE: ${DEVICE_POOL_FILE:-config/device_pool.json}
-      DEVICE_LEASE_DIR: ${DEVICE_LEASE_DIR:-data/device_leases}
+      DEVICE_LEASE_DIR: ${DEVICE_LEASE_DIR:-.runtime/device_leases}
       DEVICE_LEASE_TTL_SECONDS: ${DEVICE_LEASE_TTL_SECONDS:-7200}
     volumes:
       - ./data:/app/data

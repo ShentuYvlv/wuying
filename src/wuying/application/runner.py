@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import multiprocessing as mp
+import re
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_DNS, uuid4, uuid5
 
 from wuying.application.device_pool import DeviceTarget
 from wuying.application.platform_registry import build_workflow
@@ -30,6 +32,7 @@ def run_platform_once(
     prompt: str,
     instance_id: str | None = None,
     device: DeviceTarget | None = None,
+    save_result: bool = True,
 ) -> PlatformRunResult:
     workflow = build_workflow(settings, platform_name)
     resolved_instance_id = device.instance_id if device is not None else (instance_id or pick_default_instance(settings))
@@ -40,6 +43,7 @@ def run_platform_once(
         prompt=prompt,
         device_id=device_id,
         adb_endpoint=adb_endpoint,
+        save_result=save_result,
     )
 
 
@@ -50,12 +54,24 @@ def run_platform_once_with_timeout(
     prompt: str,
     device: DeviceTarget,
     timeout_seconds: int,
+    save_result: bool = False,
 ) -> PlatformRunResult:
     context = mp.get_context("spawn")
-    result_path = _ipc_result_path(platform_name)
+    result_nonce = uuid4().hex
+    result_path = _ipc_result_path(platform_name, device.device_id)
+    _write_child_result(result_path, {"ok": False, "pending": True, "nonce": result_nonce})
     process = context.Process(
         target=_run_platform_once_child,
-        args=(str(result_path), platform_name, prompt, device.instance_id, device.device_id, device.adb_endpoint),
+        args=(
+            str(result_path),
+            result_nonce,
+            platform_name,
+            prompt,
+            device.instance_id,
+            device.device_id,
+            device.adb_endpoint,
+            save_result,
+        ),
         name=f"wuying-{platform_name}-{device.device_id}",
     )
     process.start()
@@ -67,10 +83,7 @@ def run_platform_once_with_timeout(
         if process.is_alive():
             process.kill()
             process.join(timeout=5)
-        try:
-            result_path.unlink()
-        except OSError:
-            pass
+        _unlink_best_effort(result_path)
         raise TimeoutError(
             f"Crawler record timed out after {timeout_seconds}s: "
             f"platform={platform_name}, device_id={device.device_id}, instance_id={device.instance_id}"
@@ -83,10 +96,12 @@ def run_platform_once_with_timeout(
         )
 
     payload = json.loads(result_path.read_text(encoding="utf-8"))
-    try:
-        result_path.unlink()
-    except OSError:
-        pass
+    _unlink_best_effort(result_path)
+    if payload.get("nonce") != result_nonce or payload.get("pending"):
+        raise RuntimeError(
+            f"Crawler record exited without fresh result: platform={platform_name}, "
+            f"device_id={device.device_id}, exitcode={process.exitcode}"
+        )
     if payload.get("ok"):
         return _DictBackedResult(payload["result"]).to_result()
 
@@ -95,11 +110,13 @@ def run_platform_once_with_timeout(
 
 def _run_platform_once_child(
     result_path: str,
+    result_nonce: str,
     platform_name: str,
     prompt: str,
     instance_id: str,
     device_id: str,
     adb_endpoint: str | None,
+    save_result: bool,
 ) -> None:
     try:
         from wuying.logging_utils import configure_logging
@@ -116,20 +133,34 @@ def _run_platform_once_child(
                 adb_endpoint=adb_endpoint,
                 enabled=True,
             ),
+            save_result=save_result,
         ).to_dict()
-        _write_child_result(result_path, {"ok": True, "result": result})
+        _write_child_result(result_path, {"ok": True, "nonce": result_nonce, "result": result})
     except Exception:
-        _write_child_result(result_path, {"ok": False, "error": traceback.format_exc()})
+        _write_child_result(result_path, {"ok": False, "nonce": result_nonce, "error": traceback.format_exc()})
 
 
-def _ipc_result_path(platform_name: str) -> Path:
-    root_dir = Path("data/task_ipc")
+def _ipc_result_path(platform_name: str, device_id: str) -> Path:
+    root_dir = Path(".runtime/task_ipc")
     root_dir.mkdir(parents=True, exist_ok=True)
-    return root_dir / f"{platform_name}_{uuid4().hex}.json"
+    safe_platform = re.sub(r"[^A-Za-z0-9._-]+", "_", platform_name).strip("._") or "platform"
+    device_digest = uuid5(NAMESPACE_DNS, device_id).hex[:16]
+    return root_dir / f"{safe_platform}_{device_digest}.json"
 
 
 def _write_child_result(result_path: str, payload: dict[str, Any]) -> None:
     Path(result_path).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _unlink_best_effort(path: Path) -> None:
+    for _ in range(10):
+        try:
+            path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            time.sleep(0.1)
 
 
 @dataclass(frozen=True, slots=True)

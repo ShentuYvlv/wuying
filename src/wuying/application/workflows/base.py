@@ -34,6 +34,7 @@ class ChatAppWorkflow(ABC):
         prompt: str,
         device_id: str | None = None,
         adb_endpoint: str | None = None,
+        save_result: bool = True,
     ) -> PlatformRunResult:
         started_at = datetime.now(tz=UTC)
         endpoint = self._resolve_endpoint(instance_id, adb_endpoint=adb_endpoint)
@@ -46,6 +47,10 @@ class ChatAppWorkflow(ABC):
         self._ensure_new_chat_session(driver)
         self._ensure_chat_input_ready(driver)
         self._set_prompt_text(driver, prompt=prompt)
+        response_baseline = driver.dump_text_nodes(
+            include_content_desc=False,
+            root_resource_id=self.app.message_list_resource_id,
+        )
         self._send_prompt(driver, prompt=prompt)
 
         response = driver.wait_for_new_response(
@@ -54,6 +59,7 @@ class ChatAppWorkflow(ABC):
             settle_seconds=self.app.response_settle_seconds,
             message_root_resource_id=self.app.message_list_resource_id,
             response_selectors=self.app.selectors.response_selectors,
+            baseline=response_baseline,
         )
         response = self._finalize_response(driver, prompt=prompt, response=response)
         extra = self._collect_extra_metadata(driver, prompt=prompt, response=response)
@@ -67,13 +73,14 @@ class ChatAppWorkflow(ABC):
             prompt=prompt,
             response=response,
             adb_serial=serial,
-            output_path=output_path,
+            output_path=output_path if save_result else "",
             started_at=started_at,
             finished_at=finished_at,
             extra=extra,
         )
-        output_path.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-        logger.info("Saved result to %s", output_path)
+        if save_result:
+            output_path.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.info("Saved result to %s", output_path)
         return result
 
     def _build_output_path(
@@ -148,15 +155,31 @@ class ChatAppWorkflow(ABC):
         driver.start_app(self.app.package_name, self.app.launch_activity)
 
     def _ensure_new_chat_session(self, driver: U2Driver) -> None:
+        new_chat = driver.find_first(self.app.selectors.new_chat_selectors)
+        if new_chat is not None:
+            new_chat.click()
+            time.sleep(0.5)
+            return
+
+        clicked_back = False
         if self._is_chat_page(driver):
             back = driver.find_first(self.app.selectors.chat_back_selectors)
             if back is not None:
                 back.click()
-                time.sleep(0.2)
+                clicked_back = True
+                time.sleep(0.5)
 
-        new_chat = driver.find_first(self.app.selectors.new_chat_selectors)
+        new_chat = None
+        try:
+            new_chat = driver.wait_for_any(
+                self.app.selectors.new_chat_selectors,
+                timeout_seconds=5 if clicked_back else 2,
+            )
+        except U2DriverError:
+            new_chat = driver.find_first(self.app.selectors.new_chat_selectors)
         if new_chat is not None:
             new_chat.click()
+            time.sleep(0.5)
 
     def _is_chat_page(self, driver: U2Driver) -> bool:
         if driver.find_first(self.app.selectors.chat_back_selectors) is not None:

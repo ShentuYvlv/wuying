@@ -28,6 +28,9 @@ def main(argv: list[str] | None = None) -> int:
         build_parser().print_help()
         return 2
 
+    if raw_argv[0].startswith("-"):
+        return run_from_cli(raw_argv)
+
     command = raw_argv[0]
     forwarded = raw_argv[1:]
 

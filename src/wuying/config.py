@@ -224,6 +224,8 @@ class AppSettings:
 
         doubao_defaults = ChatAppSelectors(
             new_chat_selectors=[
+                SelectorSpec(resource_id="com.larus.nova:id/side_bar_create_conversation", description="创建新对话"),
+                SelectorSpec(resource_id="com.larus.nova:id/side_bar_create_conversation"),
                 SelectorSpec(resource_id="com.larus.nova:id/right_img", description_contains="创建新对话"),
                 SelectorSpec(text="聊聊新话题"),
             ],
@@ -425,7 +427,8 @@ class AppSettings:
                 start_adb_via_api=_get_bool("WUYING_START_ADB_VIA_API", True),
                 manual_adb_endpoint=manual_adb_endpoint,
                 device_pool_file=device_pool_file,
-                device_lease_dir=_resolve_path("DEVICE_LEASE_DIR", "data/device_leases") or Path("data/device_leases"),
+                device_lease_dir=_resolve_path("DEVICE_LEASE_DIR", ".runtime/device_leases")
+                or Path(".runtime/device_leases"),
                 device_lease_ttl_seconds=_get_int("DEVICE_LEASE_TTL_SECONDS", 7200),
             ),
             doubao=_build_chat_app_settings(
