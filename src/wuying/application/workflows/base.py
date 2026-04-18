@@ -77,7 +77,7 @@ class ChatAppWorkflow(ABC):
             baseline=response_baseline,
         )
         response = self._finalize_response(driver, prompt=prompt, response=response)
-        self._validate_response_text(prompt=prompt, response=response)
+        response = self._recover_response_if_invalid(driver, prompt=prompt, response=response)
         extra = self._collect_extra_metadata(driver, prompt=prompt, response=response)
 
         finished_at = datetime.now(tz=UTC)
@@ -403,6 +403,32 @@ class ChatAppWorkflow(ABC):
         if reason:
             raise U2DriverError(f"{self.platform_name} response is incomplete or invalid: {reason}")
 
+    def _recover_response_if_invalid(self, driver: U2Driver, *, prompt: str, response: str) -> str:
+        reason = self._invalid_response_reason(prompt=prompt, response=response)
+        if not reason:
+            return response
+
+        logger.info(
+            "%s response candidate invalid (%s); waiting once more before failing.",
+            self.platform_name,
+            reason,
+        )
+        baseline = driver.dump_text_nodes(
+            include_content_desc=False,
+            root_resource_id=self.app.message_list_resource_id,
+        )
+        recovered = driver.wait_for_new_response(
+            prompt=prompt,
+            timeout_seconds=max(20, min(self.app.response_timeout_seconds, 60)),
+            settle_seconds=self.app.response_settle_seconds,
+            message_root_resource_id=self.app.message_list_resource_id,
+            response_selectors=self.app.selectors.response_selectors,
+            baseline=baseline,
+        )
+        recovered = self._finalize_response(driver, prompt=prompt, response=recovered)
+        self._validate_response_text(prompt=prompt, response=recovered)
+        return recovered
+
     @classmethod
     def _invalid_response_reason(cls, *, prompt: str, response: str) -> str | None:
         text = response.strip() if isinstance(response, str) else ""
@@ -413,7 +439,7 @@ class ChatAppWorkflow(ABC):
             return "empty response"
         if prompt_compact and compact == prompt_compact:
             return "captured prompt instead of answer"
-        if len(compact) < 8:
+        if len(compact) < 8 and not self._prompt_allows_short_response(prompt=prompt, response=response):
             return "response too short"
         if re.fullmatch(r"\d{1,2}:\d{2}", compact):
             return "captured clock text instead of answer"
@@ -422,6 +448,18 @@ class ChatAppWorkflow(ABC):
         if compact in cls._invalid_ui_texts():
             return "captured UI control text instead of answer"
         return None
+
+    @classmethod
+    def _prompt_allows_short_response(cls, *, prompt: str, response: str) -> bool:
+        prompt_compact = cls._compact_text(prompt).upper()
+        response_compact = cls._compact_text(response).upper()
+        if not response_compact:
+            return False
+        if any(token in prompt_compact for token in ("只回复", "仅回复", "只输出", "仅输出", "回答OK", "回复OK")):
+            return True
+        if response_compact in {"OK", "YES", "NO", "是", "否", "好", "对", "错"}:
+            return any(token in prompt_compact for token in ("OK", "YES", "NO", "是", "否", "好", "对", "错"))
+        return False
 
     @staticmethod
     def _compact_text(value: str) -> str:

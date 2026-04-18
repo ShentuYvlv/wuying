@@ -386,6 +386,8 @@ class U2Driver:
                 continue
             if U2Driver._looks_like_loading_response(item):
                 continue
+            if U2Driver._looks_like_invalid_response_candidate(item, prompt=prompt):
+                continue
             candidates.append(item)
         if not candidates:
             return ""
@@ -466,4 +468,44 @@ class U2Driver:
             first_line = text.splitlines()[0].strip()
             if re.search(r"找到\s*\d+\s*篇资料", first_line):
                 return True
+        return False
+
+    @staticmethod
+    def _looks_like_invalid_response_candidate(value: str, *, prompt: str) -> bool:
+        text = value.strip()
+        if not text:
+            return True
+        compact = re.sub(r"\s+", "", text)
+        if len(compact) < 8 and not U2Driver._prompt_allows_short_response(prompt, compact):
+            return True
+        if re.fullmatch(r"\d{1,2}:\d{2}", compact):
+            return True
+        if compact in {
+            "内容由AI生成",
+            "发送",
+            "复制",
+            "引用",
+            "搜索网页",
+            "新建对话",
+            "快速",
+            "AI创作",
+            "拍题答疑",
+            "电话",
+            "问点什么",
+            "发消息或按住说话",
+            "按住说话",
+        }:
+            return True
+        return False
+
+    @staticmethod
+    def _prompt_allows_short_response(prompt: str, compact_response: str) -> bool:
+        prompt_compact = re.sub(r"\s+", "", prompt or "").upper()
+        response_upper = compact_response.upper()
+        if not response_upper:
+            return False
+        if any(token in prompt_compact for token in ("只回复", "仅回复", "只输出", "仅输出", "回答OK", "回复OK")):
+            return True
+        if response_upper in {"OK", "YES", "NO", "是", "否", "好", "对", "错"}:
+            return any(token in prompt_compact for token in ("OK", "YES", "NO", "是", "否", "好", "对", "错"))
         return False
