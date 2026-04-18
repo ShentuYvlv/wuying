@@ -188,9 +188,43 @@ class DeepseekWorkflow(ComposeChatWorkflow):
 
     def _scroll_towards_answer_bottom(self, driver: U2Driver) -> None:
         try:
+            if self._dismiss_keyboard_if_visible(driver):
+                return
             driver.swipe_up(start_ratio=0.78, end_ratio=0.34, x_ratio=0.5)
         except Exception as exc:
             logger.debug("DeepSeek answer-bottom scroll failed: %s", exc)
+
+    def _dismiss_keyboard_if_visible(self, driver: U2Driver) -> bool:
+        try:
+            root = driver.dump_hierarchy_root()
+        except Exception:
+            return False
+
+        if not self._keyboard_visible(root):
+            return False
+
+        logger.info("DeepSeek keyboard is visible during answer wait; closing keyboard before scrolling.")
+        try:
+            self.adb.shell(driver.serial, "input", "keyevent", "4", timeout=5)
+            time.sleep(0.25)
+            return True
+        except Exception as exc:
+            logger.debug("Failed to close DeepSeek keyboard before scrolling: %s", exc)
+            return False
+
+    @staticmethod
+    def _keyboard_visible(root: ET.Element) -> bool:
+        for node in root.iter("node"):
+            package_name = (node.attrib.get("package") or "").lower()
+            class_name = (node.attrib.get("class") or "").lower()
+            resource_id = (node.attrib.get("resource-id") or "").lower()
+            if "inputmethod" in package_name or "keyboard" in package_name:
+                return True
+            if "inputmethod" in class_name or "keyboard" in class_name:
+                return True
+            if "inputmethod" in resource_id or "keyboard" in resource_id:
+                return True
+        return False
 
     @classmethod
     def _node_label(cls, node: ET.Element) -> str:

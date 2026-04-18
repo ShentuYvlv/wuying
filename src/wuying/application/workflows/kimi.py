@@ -39,7 +39,22 @@ class KimiWorkflow(ComposeChatWorkflow):
 
     def _collect_extra_metadata(self, driver: U2Driver, *, prompt: str, response: str) -> dict[str, object]:
         summary, items = self._collect_references(driver)
-        return self._build_references_payload(summary=summary, items=items)
+        expected = self._references_expected(driver, summary=summary, items=items)
+        if self._references_incomplete(expected=expected, summary=summary, items=items):
+            logger.info("Kimi references expected but incomplete; retrying once.")
+            self._close_reference_sheet(driver)
+            time.sleep(0.25)
+            retry_summary, retry_items = self._collect_references(driver)
+            summary = retry_summary or summary
+            items = self._merge_reference_items(items, retry_items)
+
+        payload = self._build_references_payload(summary=summary, items=items)
+        payload["reference_collection"] = self._reference_collection_status(
+            expected=expected or bool(summary or items),
+            summary=summary,
+            items=items,
+        )
+        return payload
 
     def _set_prompt_text(self, driver: U2Driver, *, prompt: str) -> None:
         if self._try_fast_set_prompt_text(driver, prompt=prompt):
@@ -391,6 +406,93 @@ class KimiWorkflow(ComposeChatWorkflow):
         except Exception as exc:
             logger.warning("Failed to collect Kimi references: %s", exc)
             return None, []
+
+    def _references_expected(
+        self,
+        driver: U2Driver,
+        *,
+        summary: str | None,
+        items: list[dict[str, object]],
+    ) -> bool:
+        if summary or items:
+            return True
+        try:
+            root = driver.dump_hierarchy_root()
+        except Exception:
+            return False
+        return bool(self._find_reference_summary(root)[0]) or self._find_reference_button_bounds(root) is not None
+
+    def _references_incomplete(
+        self,
+        *,
+        expected: bool,
+        summary: str | None,
+        items: list[dict[str, object]],
+    ) -> bool:
+        expected_count = self._reference_count_from_summary(summary)
+        if expected_count is not None:
+            return len(items) < expected_count
+        return expected and not items
+
+    @staticmethod
+    def _reference_count_from_summary(summary: str | None) -> int | None:
+        if not summary:
+            return None
+        match = re.search(r"引用来源\s*(\d+)", summary)
+        if not match:
+            return None
+        return int(match.group(1))
+
+    @staticmethod
+    def _merge_reference_items(
+        first: list[dict[str, object]],
+        second: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        merged: list[dict[str, object]] = []
+        seen: set[tuple[object, object, object, object]] = set()
+        for item in [*first, *second]:
+            key = (
+                item.get("title"),
+                item.get("source"),
+                item.get("published_at"),
+                item.get("url"),
+            )
+            if key in seen:
+                continue
+            if not any(key):
+                continue
+            copied = dict(item)
+            copied["index"] = len(merged) + 1
+            merged.append(copied)
+            seen.add(key)
+        return merged
+
+    def _reference_collection_status(
+        self,
+        *,
+        expected: bool,
+        summary: str | None,
+        items: list[dict[str, object]],
+    ) -> dict[str, object]:
+        expected_count = self._reference_count_from_summary(summary)
+        collected_count = len(items)
+        if expected_count is not None:
+            if collected_count >= expected_count:
+                status = "complete"
+            elif collected_count > 0:
+                status = "partial"
+            else:
+                status = "missing"
+        elif expected:
+            status = "partial" if collected_count > 0 else "missing"
+        else:
+            status = "not_expected"
+
+        return {
+            "status": status,
+            "expected_count": expected_count,
+            "collected_count": collected_count,
+        }
 
     def _open_reference_sheet(self, driver: U2Driver) -> bool:
         root = driver.dump_hierarchy_root()

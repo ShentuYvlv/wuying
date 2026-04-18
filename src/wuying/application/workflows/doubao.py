@@ -179,17 +179,103 @@ class DoubaoWorkflow(ChatAppWorkflow):
     def _collect_extra_metadata(self, driver: U2Driver, *, prompt: str, response: str) -> dict[str, object]:
         reference_started_at = time.perf_counter()
         search_summary, reference_keywords, reference_titles = self._collect_reference_metadata(driver)
+        if self._references_incomplete(driver, response=response, summary=search_summary, titles=reference_titles):
+            logger.info("Doubao references expected but incomplete; retrying once.")
+            self._close_reference_panel_if_open(driver)
+            time.sleep(0.25)
+            retry_summary, retry_keywords, retry_titles = self._collect_reference_metadata(driver)
+            search_summary = retry_summary or search_summary
+            self._extend_unique(reference_keywords, retry_keywords)
+            reference_titles = self._merge_reference_title_lists(reference_titles, retry_titles)
+
         reference_elapsed = time.perf_counter() - reference_started_at
         logger.info(
             "Doubao timings: references=%.2fs, titles=%s",
             reference_elapsed,
             len(reference_titles),
         )
-        return self._build_references_payload(
+        payload = self._build_references_payload(
             summary=search_summary,
             keywords=reference_keywords,
             items=reference_titles,
         )
+        payload["reference_collection"] = self._reference_collection_status(
+            driver,
+            response=response,
+            summary=search_summary,
+            titles=reference_titles,
+        )
+        return payload
+
+    def _references_incomplete(
+        self,
+        driver: U2Driver,
+        *,
+        response: str,
+        summary: str | None,
+        titles: list[str],
+    ) -> bool:
+        expected_count = self._extract_reference_count(summary)
+        if expected_count is not None:
+            return len(titles) < expected_count
+        if titles:
+            return False
+        if summary:
+            return True
+        if "[__LINK_ICON" in response or "[citation:" in response:
+            return True
+        try:
+            return driver.find_first(self.settings.doubao.selectors.reference_expand_selectors) is not None
+        except Exception:
+            return False
+
+    def _close_reference_panel_if_open(self, driver: U2Driver) -> None:
+        try:
+            root = driver.dump_hierarchy_root()
+        except Exception:
+            return
+        if self._find_node_by_resource_id(root, self.REFERENCE_PANEL_RESOURCE_ID) is None:
+            return
+        try:
+            self.adb.shell(driver.serial, "input", "keyevent", "4", timeout=5)
+            time.sleep(0.2)
+        except Exception as exc:
+            logger.debug("Failed to close Doubao reference panel before retry: %s", exc)
+
+    def _reference_collection_status(
+        self,
+        driver: U2Driver,
+        *,
+        response: str,
+        summary: str | None,
+        titles: list[str],
+    ) -> dict[str, object]:
+        expected_count = self._extract_reference_count(summary)
+        collected_count = len(titles)
+
+        expected = bool(summary or titles) or expected_count is not None or self._references_incomplete(
+            driver,
+            response=response,
+            summary=summary,
+            titles=titles,
+        )
+        if expected_count is not None:
+            if collected_count >= expected_count:
+                status = "complete"
+            elif collected_count > 0:
+                status = "partial"
+            else:
+                status = "missing"
+        elif expected:
+            status = "partial" if collected_count > 0 else "missing"
+        else:
+            status = "not_expected"
+
+        return {
+            "status": status,
+            "expected_count": expected_count,
+            "collected_count": collected_count,
+        }
 
     def _extract_reference_metadata(self, visible_texts: list[str]) -> tuple[str | None, list[str], list[str]]:
         normalized = [self._normalize_visible_text(item) for item in visible_texts]
@@ -448,6 +534,18 @@ class DoubaoWorkflow(ChatAppWorkflow):
                 target.append(item)
                 added += 1
         return added
+
+    @staticmethod
+    def _merge_reference_title_lists(first: list[str], second: list[str]) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for title in [*first, *second]:
+            normalized = title.strip() if isinstance(title, str) else ""
+            if not normalized or normalized in seen:
+                continue
+            merged.append(normalized)
+            seen.add(normalized)
+        return merged
 
     @staticmethod
     def _reference_scan_rounds(expected_reference_count: int | None) -> int:

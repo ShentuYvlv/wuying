@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
@@ -76,6 +77,7 @@ class ChatAppWorkflow(ABC):
             baseline=response_baseline,
         )
         response = self._finalize_response(driver, prompt=prompt, response=response)
+        self._validate_response_text(prompt=prompt, response=response)
         extra = self._collect_extra_metadata(driver, prompt=prompt, response=response)
 
         finished_at = datetime.now(tz=UTC)
@@ -391,6 +393,58 @@ class ChatAppWorkflow(ABC):
 
     def _finalize_response(self, driver: U2Driver, *, prompt: str, response: str) -> str:
         return response
+
+    def _validate_response_text(self, *, prompt: str, response: str) -> None:
+        reason = self._invalid_response_reason(prompt=prompt, response=response)
+        if reason:
+            raise U2DriverError(f"{self.platform_name} response is incomplete or invalid: {reason}")
+
+    @classmethod
+    def _invalid_response_reason(cls, *, prompt: str, response: str) -> str | None:
+        text = response.strip() if isinstance(response, str) else ""
+        compact = cls._compact_text(text)
+        prompt_compact = cls._compact_text(prompt)
+
+        if not compact:
+            return "empty response"
+        if prompt_compact and compact == prompt_compact:
+            return "captured prompt instead of answer"
+        if len(compact) < 8:
+            return "response too short"
+        if re.fullmatch(r"\d{1,2}:\d{2}", compact):
+            return "captured clock text instead of answer"
+        if U2Driver._looks_like_loading_response(text):
+            return "captured loading/search text before answer completed"
+        if compact in cls._invalid_ui_texts():
+            return "captured UI control text instead of answer"
+        return None
+
+    @staticmethod
+    def _compact_text(value: str) -> str:
+        return re.sub(r"\s+", "", value or "").strip()
+
+    @staticmethod
+    def _invalid_ui_texts() -> set[str]:
+        return {
+            "内容由AI生成",
+            "发送",
+            "复制",
+            "引用",
+            "搜索网页",
+            "新建对话",
+            "临时对话",
+            "智能搜索",
+            "深度思考",
+            "Agent",
+            "网站",
+            "PPT",
+            "KimiClaw",
+            "深度研究",
+            "问点什么",
+            "发消息或按住说话",
+            "尽管问带图也行",
+            "按住说话",
+        }
 
     @staticmethod
     def _build_references_payload(
