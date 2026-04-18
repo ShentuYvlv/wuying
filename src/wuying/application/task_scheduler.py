@@ -245,7 +245,7 @@ def _run_device(
             platform=platform,
             prompt=prompt,
             timeout_seconds=record_timeout_seconds,
-            save_result=False,
+            save_result=True,
         )
         finished_at = _utc_now()
         logger.info(

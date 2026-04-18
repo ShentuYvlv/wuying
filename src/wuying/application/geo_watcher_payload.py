@@ -27,6 +27,7 @@ def build_geo_watcher_records(
             "attitude": MOCK_ATTITUDE,
             "platform_id": platform_id,
             "platform": raw_result.get("platform", ""),
+            "device_id": raw_result.get("device_id", ""),
             "references": raw_result.get("references", {}),
             "raw_output_path": raw_result.get("output_path", ""),
         },
