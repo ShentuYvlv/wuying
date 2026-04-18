@@ -47,10 +47,7 @@ class ChatAppWorkflow(ABC):
         self._ensure_new_chat_session(driver)
         self._ensure_chat_input_ready(driver)
         self._set_prompt_text(driver, prompt=prompt)
-        response_baseline = driver.dump_text_nodes(
-            include_content_desc=False,
-            root_resource_id=self.app.message_list_resource_id,
-        )
+        response_baseline = self._capture_response_baseline(driver)
         self._send_prompt(driver, prompt=prompt)
 
         response = driver.wait_for_new_response(
@@ -195,6 +192,17 @@ class ChatAppWorkflow(ABC):
 
     def _set_prompt_text(self, driver: U2Driver, *, prompt: str) -> None:
         driver.set_text(self.app.selectors.input_selectors, prompt, timeout_seconds=30)
+
+    def _capture_response_baseline(self, driver: U2Driver) -> list[str] | None:
+        if not self._capture_response_baseline_before_send():
+            return None
+        return driver.dump_text_nodes(
+            include_content_desc=False,
+            root_resource_id=self.app.message_list_resource_id,
+        )
+
+    def _capture_response_baseline_before_send(self) -> bool:
+        return True
 
     def _finalize_response(self, driver: U2Driver, *, prompt: str, response: str) -> str:
         return response

@@ -32,6 +32,9 @@ class QianwenWorkflow(ComposeChatWorkflow):
         summary, items = self._collect_references(driver)
         return self._build_references_payload(summary=summary, items=items)
 
+    def _capture_response_baseline_before_send(self) -> bool:
+        return False
+
     def _collect_references(self, driver: U2Driver) -> tuple[str | None, list[dict[str, object]]]:
         opened = False
         try:
