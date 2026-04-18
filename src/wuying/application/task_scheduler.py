@@ -7,9 +7,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
-from wuying.application.batch_models import BatchTaskRequest, DeviceRunRecord, PlatformPromptBatchRecord
+from wuying.application.batch_models import BatchTaskRequest, DeviceRunRecord
 from wuying.application.device_pool import DeviceTarget
-from wuying.application.worker_manager import WorkerManager, WorkerManagerError
+from wuying.application.geo_watcher_payload import MOCK_ATTITUDE, MOCK_METRICS
+from wuying.application.worker_manager import WorkerManager
 from wuying.config import AppSettings
 
 logger = logging.getLogger(__name__)
@@ -33,12 +34,15 @@ def run_batch_job_with_workers(
     if batch_timeout_seconds and batch_timeout_seconds > 0:
         deadline = datetime.now(tz=UTC).timestamp() + batch_timeout_seconds
 
-    batch_root_dir = settings.batch_output_dir / task_id
-    batch_root_dir.mkdir(parents=True, exist_ok=True)
+    task_root_dir = _task_root_dir(settings, task_id)
+    records_path = _records_path(task_root_dir)
+    raw_dir = task_root_dir / "raw"
+    task_root_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    _write_records_file(records_path, [])
     worker_manager.start_all(devices)
 
-    platform_batches: list[dict[str, object]] = []
-    flattened_results: list[dict[str, object]] = []
+    records: list[dict[str, object]] = []
     finished_records = 0
     failed_records = 0
     finished_batches = 0
@@ -66,7 +70,6 @@ def run_batch_job_with_workers(
                     prompt_index,
                     ",".join(device.device_id for device in devices),
                 )
-                platform_started_at = _utc_now()
                 if progress_callback is not None:
                     progress_callback(
                         {
@@ -88,48 +91,27 @@ def run_batch_job_with_workers(
                     record_timeout_seconds=record_timeout_seconds,
                 )
                 batch_status = _aggregate_device_status(device_results)
-                platform_finished_at = _utc_now()
-                platform_output_path = _write_platform_batch_summary(
-                    batch_root_dir=batch_root_dir,
-                    platform=platform,
-                    prompt=prompt,
-                    prompt_index=prompt_index,
-                    repeat_index=repeat_index,
-                    status=batch_status,
-                    started_at=platform_started_at,
-                    finished_at=platform_finished_at,
-                    device_results=device_results,
-                )
-
-                batch_record = PlatformPromptBatchRecord(
-                    platform=platform,
-                    prompt=prompt,
-                    prompt_index=prompt_index,
-                    repeat_index=repeat_index,
-                    device_ids=[device.device_id for device in devices],
-                    status=batch_status,
-                    started_at=platform_started_at,
-                    finished_at=platform_finished_at,
-                    output_path=str(platform_output_path),
-                    results=device_results,
-                )
-                platform_batches.append(batch_record.to_dict())
                 finished_batches += 1
                 if batch_status != "succeeded":
                     failed_batches += 1
 
                 for device_result in device_results:
-                    flattened_results.append(_flatten_device_result(device_result))
+                    output_record = _build_output_record(
+                        device_result,
+                        raw_dir=raw_dir,
+                    )
+                    records.append(output_record)
                     finished_records += 1
                     if device_result.status != "succeeded":
                         failed_records += 1
                         last_error = device_result.error or last_error
 
+                _write_records_file(records_path, records)
                 if progress_callback is not None:
                     progress_callback(
                         {
-                            "platform_batches": platform_batches,
-                            "results": flattened_results,
+                            "records_path": str(records_path),
+                            "output_file": str(records_path),
                             "finished_records": finished_records,
                             "failed_records": failed_records,
                             "finished_batches": finished_batches,
@@ -153,31 +135,20 @@ def run_batch_job_with_workers(
         failed_batches=failed_batches,
         stopped_reason=stopped_reason,
     )
-    summary_path = _write_batch_summary(
-        batch_root_dir=batch_root_dir,
-        task_id=task_id,
-        platforms=request.platforms,
-        device_ids=[device.device_id for device in devices],
-        prompts=request.prompts,
-        repeat=request.repeat,
-        status=overall_status,
-        started_at=started_at,
-        finished_at=finished_at,
-        platform_batches=platform_batches,
-        error=last_error,
-    )
+    _write_records_file(records_path, records)
 
     return {
+        "task_id": task_id,
         "status": overall_status,
         "started_at": started_at,
         "finished_at": finished_at,
-        "platform_batches": platform_batches,
-        "results": flattened_results,
+        "records": records,
+        "records_path": str(records_path),
+        "output_file": str(records_path),
         "finished_records": finished_records,
         "failed_records": failed_records,
         "finished_batches": finished_batches,
         "failed_batches": failed_batches,
-        "summary_path": str(summary_path),
         "error": last_error,
         "current_platform": None,
         "current_repeat_index": None,
@@ -245,7 +216,7 @@ def _run_device(
             platform=platform,
             prompt=prompt,
             timeout_seconds=record_timeout_seconds,
-            save_result=True,
+            save_result=False,
         )
         finished_at = _utc_now()
         logger.info(
@@ -317,125 +288,82 @@ def _run_device(
         )
 
 
-def _flatten_device_result(record: DeviceRunRecord) -> dict[str, object]:
-    if record.result:
-        flattened = dict(record.result)
-        flattened["device_id"] = record.device_id
-        flattened["adb_endpoint"] = record.adb_endpoint
-        flattened["status"] = record.status
-        flattened["prompt_index"] = record.prompt_index
-        flattened["repeat_index"] = record.repeat_index
-        return flattened
+def _build_output_record(record: DeviceRunRecord, *, raw_dir: Path) -> dict[str, object]:
+    result = dict(record.result or {})
+    response = str(result.get("response") or "") if result else ""
+    references = result.get("references") if isinstance(result.get("references"), dict) else _empty_references()
+    raw_output_path: str | None = None
+    platform_extra = result.get("platform_extra") if isinstance(result.get("platform_extra"), dict) else {}
+
+    if result:
+        raw_output_path = str(_write_raw_result(record, result, raw_dir=raw_dir))
 
     return {
+        "platform_id": f"wuying-{record.platform}",
         "platform": record.platform,
-        "instance_id": record.instance_id,
         "device_id": record.device_id,
+        "instance_id": record.instance_id,
         "adb_endpoint": record.adb_endpoint,
+        "query": record.prompt,
         "prompt": record.prompt,
+        "prompt_index": record.prompt_index,
+        "repeat_index": record.repeat_index,
+        "response": response,
+        **MOCK_METRICS,
+        "attitude": MOCK_ATTITUDE,
+        "references": references,
+        "raw_output_path": raw_output_path,
         "status": record.status,
         "error": record.error,
         "started_at": record.started_at,
         "finished_at": record.finished_at,
-        "prompt_index": record.prompt_index,
-        "repeat_index": record.repeat_index,
+        "platform_extra": platform_extra,
     }
 
 
-def _write_platform_batch_summary(
-    *,
-    batch_root_dir: Path,
-    platform: str,
-    prompt: str,
-    prompt_index: int,
-    repeat_index: int,
-    status: str,
-    started_at: str,
-    finished_at: str,
-    device_results: list[DeviceRunRecord],
-) -> Path:
-    platform_dir = batch_root_dir / platform
-    platform_dir.mkdir(parents=True, exist_ok=True)
-    output_path = platform_dir / f"repeat_{repeat_index:03d}_prompt_{prompt_index:03d}.json"
-    payload = {
-        "platform": platform,
-        "prompt": prompt,
-        "prompt_index": prompt_index,
-        "repeat_index": repeat_index,
-        "device_ids": [item.device_id for item in device_results],
-        "status": status,
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "results": [item.to_dict() for item in device_results],
-    }
-    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return output_path
+def _write_raw_result(record: DeviceRunRecord, result: dict[str, object], *, raw_dir: Path) -> Path:
+    raw_path = raw_dir / (
+        f"{_safe_filename_part(record.platform)}_"
+        f"{_safe_filename_part(record.device_id)}_"
+        f"p{record.prompt_index:03d}_r{record.repeat_index:03d}.json"
+    )
+    payload = dict(result)
+    payload["platform"] = record.platform
+    payload["platform_id"] = f"wuying-{record.platform}"
+    payload["device_id"] = record.device_id
+    payload["instance_id"] = record.instance_id
+    payload["adb_endpoint"] = record.adb_endpoint
+    payload["prompt_index"] = record.prompt_index
+    payload["repeat_index"] = record.repeat_index
+    payload["status"] = record.status
+    payload["error"] = record.error
+    payload["output_path"] = str(raw_path)
+    raw_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return raw_path
 
 
-def _write_batch_summary(
-    *,
-    batch_root_dir: Path,
-    task_id: str,
-    platforms: list[str],
-    device_ids: list[str],
-    prompts: list[str],
-    repeat: int,
-    status: str,
-    started_at: str,
-    finished_at: str,
-    platform_batches: list[dict[str, object]],
-    error: str | None,
-) -> Path:
-    output_path = batch_root_dir / "summary.json"
-    payload = {
-        "job_id": task_id,
-        "platforms": platforms,
-        "device_ids": device_ids,
-        "prompts": prompts,
-        "repeat": repeat,
-        "status": status,
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "error": error,
-        "platform_batches": [_compact_platform_batch(item) for item in platform_batches],
-    }
-    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return output_path
+def _task_root_dir(settings: AppSettings, task_id: str) -> Path:
+    return settings.batch_output_dir.parent / "tasks" / task_id
 
 
-def _compact_platform_batch(batch: dict[str, object]) -> dict[str, object]:
-    return {
-        "platform": batch.get("platform"),
-        "prompt": batch.get("prompt"),
-        "prompt_index": batch.get("prompt_index"),
-        "repeat_index": batch.get("repeat_index"),
-        "device_ids": batch.get("device_ids", []),
-        "status": batch.get("status"),
-        "started_at": batch.get("started_at"),
-        "finished_at": batch.get("finished_at"),
-        "output_path": batch.get("output_path"),
-        "results": [
-            _compact_device_result(item)
-            for item in batch.get("results", [])
-            if isinstance(item, dict)
-        ],
-    }
+def _records_path(task_root_dir: Path) -> Path:
+    return task_root_dir / "records.json"
 
 
-def _compact_device_result(result: dict[str, object]) -> dict[str, object]:
-    return {
-        "device_id": result.get("device_id"),
-        "instance_id": result.get("instance_id"),
-        "adb_endpoint": result.get("adb_endpoint"),
-        "platform": result.get("platform"),
-        "prompt_index": result.get("prompt_index"),
-        "repeat_index": result.get("repeat_index"),
-        "status": result.get("status"),
-        "started_at": result.get("started_at"),
-        "finished_at": result.get("finished_at"),
-        "result_path": result.get("result_path"),
-        "error": result.get("error"),
-    }
+def _write_records_file(records_path: Path, records: list[dict[str, object]]) -> None:
+    records_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = records_path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(records_path)
+
+
+def _safe_filename_part(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value.strip())
+    return cleaned or "unknown"
+
+
+def _empty_references() -> dict[str, object]:
+    return {"summary": None, "keywords": [], "items": []}
 
 
 def _aggregate_device_status(device_results: list[DeviceRunRecord]) -> str:

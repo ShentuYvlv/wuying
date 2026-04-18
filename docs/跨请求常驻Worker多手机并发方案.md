@@ -368,23 +368,27 @@ request B 等待杭州释放
 
 ## 输出结构
 
-继续沿用当前 batch 输出：
+统一使用任务 records 输出：
 
 ```text
-data/batches/{task_id}/{platform}/repeat_001_prompt_001.json
-data/batches/{task_id}/summary.json
+data/tasks/{task_id}/records.json
+data/tasks/{task_id}/raw/*.json
 ```
 
-每个平台文件仍保存多设备结果：
+`records.json` 保存扁平设备结果：
 
 ```json
-{
-  "platform": "kimi",
-  "prompt": "上海天气",
-  "device_ids": ["杭州", "上海"],
-  "status": "succeeded",
-  "results": []
-}
+[
+  {
+    "platform_id": "wuying-kimi",
+    "platform": "kimi",
+    "device_id": "杭州",
+    "query": "上海天气",
+    "response": "...",
+    "status": "succeeded",
+    "raw_output_path": "data/tasks/{task_id}/raw/kimi_杭州_p001_r001.json"
+  }
+]
 ```
 
 ## CLI 行为

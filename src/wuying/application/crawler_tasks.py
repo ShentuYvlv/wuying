@@ -17,7 +17,6 @@ from wuying.application.batch_models import BatchTaskRequest
 from wuying.application.batch_runner import resolve_batch_devices, run_batch_job
 from wuying.application.device_lease import DeviceLeaseError, DeviceLeaseManager
 from wuying.application.device_pool import load_device_pool
-from wuying.application.geo_watcher_payload import build_geo_watcher_records
 from wuying.application.platform_registry import available_platform_names, get_platform_definition
 from wuying.application.worker_manager import WorkerManager
 from wuying.config import AppSettings
@@ -99,8 +98,31 @@ class TaskStore:
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
 
+    def dir_for(self, task_id: str) -> Path:
+        return self.root_dir / task_id
+
     def path_for(self, task_id: str) -> Path:
-        return self.root_dir / f"{task_id}.json"
+        return self.dir_for(task_id) / "status.json"
+
+    def records_path_for(self, task_id: str) -> Path:
+        return self.dir_for(task_id) / "records.json"
+
+    def read_records(self, task_id: str) -> list[dict[str, Any]]:
+        path = self.records_path_for(task_id)
+        if not path.exists():
+            return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
+
+    def write_records(self, task_id: str, records: list[dict[str, Any]]) -> Path:
+        path = self.records_path_for(task_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
+        return path
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         task_id = str(payload["task_id"])
@@ -122,6 +144,7 @@ class TaskStore:
         return current
 
     def _write_atomic(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp_path.replace(path)
@@ -130,9 +153,7 @@ class TaskStore:
 class CrawlerTaskService:
     def __init__(self, *, settings: AppSettings) -> None:
         self.settings = settings
-        self.store = TaskStore()
-        self.callback_payload_dir = Path("data/callback_payloads")
-        self.callback_payload_dir.mkdir(parents=True, exist_ok=True)
+        self.store = TaskStore(settings.batch_output_dir.parent / "tasks")
         self.record_timeout_seconds = _get_env_int("CRAWLER_RECORD_TIMEOUT_SECONDS", 300)
         self.batch_timeout_seconds = settings.batch_timeout_seconds
         self.lease_manager = DeviceLeaseManager(
@@ -205,6 +226,7 @@ class CrawlerTaskService:
 
     def get_results(self, task_id: str) -> dict[str, Any]:
         task = self.store.get(task_id)
+        records = self.store.read_records(task_id)
         return {
             "task_id": task["task_id"],
             "status": task["status"],
@@ -213,9 +235,9 @@ class CrawlerTaskService:
             "platform_ids": task.get("platform_ids", []),
             "device_ids": task.get("device_ids", []),
             "selected_devices": task.get("selected_devices", []),
-            "results": task.get("results", []),
-            "platform_batches": task.get("platform_batches", []),
-            "summary_path": task.get("summary_path"),
+            "records_path": task.get("records_path"),
+            "records": records,
+            "results": records,
             "callback": task.get("callback"),
             "error": task.get("error"),
         }
@@ -237,6 +259,7 @@ class CrawlerTaskService:
             raise TaskConflictError(str(exc)) from exc
 
         created_at = _utc_now()
+        records_path = self.store.write_records(task_id, [])
         task_payload = {
             "task_id": task_id,
             "trace_id": task_id,
@@ -249,8 +272,8 @@ class CrawlerTaskService:
             "failed_records": 0,
             "finished_batches": 0,
             "failed_batches": 0,
-            "output_file": str(self.store.path_for(task_id)),
-            "summary_path": None,
+            "output_file": str(records_path),
+            "records_path": str(records_path),
             "save_name": batch_request.save_name,
             "prompts": batch_request.prompts,
             "repeat": batch_request.repeat,
@@ -260,8 +283,6 @@ class CrawlerTaskService:
             "selected_devices": [device.to_dict() for device in devices],
             "platforms": batch_request.platforms,
             "platform_ids": platform_ids,
-            "results": [],
-            "platform_batches": [],
             "callback": {"status": "pending"},
             "error": None,
             "current_platform": None,
@@ -317,7 +338,7 @@ class CrawlerTaskService:
                 progress_callback=lambda patch: self.store.update(task_id, patch),
                 worker_manager=self.worker_manager,
             )
-            task = self.store.update(task_id, batch_result)
+            task = self.store.update(task_id, _without_records(batch_result))
         except Exception as exc:
             logger.exception("Crawler task failed: task_id=%s", task_id)
             task = self.store.update(
@@ -354,33 +375,15 @@ class CrawlerTaskService:
         if not callback_api_key:
             return {"status": "skipped", "reason": "missing callback_api_key"}
 
-        successful_results = [
-            result
-            for result in task.get("results", [])
-            if str(result.get("status") or "") == "succeeded"
+        successful_records = [
+            record
+            for record in self.store.read_records(str(task["task_id"]))
+            if str(record.get("status") or "") == "succeeded"
         ]
-        if not successful_results:
+        if not successful_records:
             return {"status": "skipped", "reason": "no successful records"}
 
-        records: list[dict[str, Any]] = []
-        for raw_result in successful_results:
-            platform_id = _first_non_empty(
-                raw_result.get("platform_id"),
-                env.get("platform_id"),
-                api_platform_id_for_internal(str(raw_result.get("platform") or "")),
-            )
-            records.extend(
-                build_geo_watcher_records(
-                    raw_result=raw_result,
-                    platform_id=platform_id or "",
-                )
-            )
-
-        if not records:
-            return {"status": "skipped", "reason": "no callback records"}
-
-        payload_path = self.callback_payload_dir / f"{task['task_id']}.json"
-        payload_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload_bytes = json.dumps(successful_records, ensure_ascii=False, indent=2).encode("utf-8")
 
         form_data = {
             "run_id": _first_non_empty(env.get("run_id"), task["task_id"]),
@@ -388,7 +391,7 @@ class CrawlerTaskService:
             "user_id": _first_non_empty(env.get("user_id")),
             "platform_id": _first_non_empty(
                 env.get("platform_id"),
-                records[0].get("platform_id"),
+                successful_records[0].get("platform_id"),
             ),
             "product_id": _first_non_empty(env.get("product_id")),
             "keyword_id": _first_non_empty(env.get("keyword_id")),
@@ -402,24 +405,24 @@ class CrawlerTaskService:
                     callback_url,
                     headers={"x-api-key": callback_api_key},
                     data=form_data,
-                    files={"files": (payload_path.name, payload_path.read_bytes(), "application/json")},
+                    files={"files": ("records.json", payload_bytes, "application/json")},
                 )
                 response.raise_for_status()
             logger.info("Callback uploaded successfully: task_id=%s status=%s", task["task_id"], response.status_code)
             return {
                 "status": "succeeded",
-                "payload_path": str(payload_path),
+                "records_path": task.get("records_path"),
                 "http_status": response.status_code,
                 "response_text": response.text,
-                "record_count": len(records),
+                "record_count": len(successful_records),
             }
         except Exception as exc:
             logger.warning("Callback upload failed: task_id=%s error=%s", task["task_id"], exc)
             return {
                 "status": "failed",
-                "payload_path": str(payload_path),
+                "records_path": task.get("records_path"),
                 "error": str(exc),
-                "record_count": len(records),
+                "record_count": len(successful_records),
             }
 
     def get_worker_statuses(self) -> list[dict[str, object]]:
@@ -454,6 +457,12 @@ def _get_env_int(name: str, default: int) -> int:
 
 def _utc_now() -> str:
     return datetime.now(tz=UTC).isoformat()
+
+
+def _without_records(payload: dict[str, Any]) -> dict[str, Any]:
+    compact = dict(payload)
+    compact.pop("records", None)
+    return compact
 
 
 __all__ = [

@@ -44,6 +44,7 @@ class TaskAcceptedOut(BaseModel):
     status: str
     expected_records: int
     output_file: str
+    records_path: str | None = None
     expected_batches: int | None = None
 
 
@@ -106,6 +107,7 @@ def create_app() -> FastAPI:
             "status": "pending",
             "expected_records": task["expected_records"],
             "output_file": task["output_file"],
+            "records_path": task.get("records_path"),
             "expected_batches": task["expected_batches"],
         }
 
@@ -159,6 +161,7 @@ def create_app() -> FastAPI:
             "status": "pending",
             "expected_records": task["expected_records"],
             "output_file": task["output_file"],
+            "records_path": task.get("records_path"),
             "expected_batches": task["expected_batches"],
         }
 

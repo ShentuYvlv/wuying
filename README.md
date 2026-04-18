@@ -76,9 +76,9 @@ $env:ADB_VENDOR_KEYS="E:\all code\C一念\wuying\platform-tools\adbkey"
 - 设备池默认配置文件是 [device_pool.json](E:/all code/C一念/wuying/config/device_pool.json)
 - 设备池只区分 `device_id / instance_id / adb_endpoint`，不单独配置密钥对；密钥对和 `adbkey` 继续走全局 `.env`
 - 执行顺序固定是：`平台 -> prompt -> 设备并发`
-- 同一平台同一条 prompt 下，多台手机结果会汇总到 `data/batches/<task_id>/<platform>/repeat_xxx_prompt_xxx.json`
-- `data/batches/<task_id>/summary.json` 只保存索引和状态，不重复保存完整回答
-- 批量模式不再额外写 `data/runs/*.json` 单机副本
+- 多设备、多平台、多 prompt 的最终结果统一汇总到 `data/tasks/<task_id>/records.json`
+- 单条原始结果保存到 `data/tasks/<task_id>/raw/*.json`
+- `data/runs` 已废弃，不再作为任何模式的输出目录
 
 ## API 运行
 
@@ -199,6 +199,14 @@ Invoke-RestMethod `
   -Uri "http://127.0.0.1:8000/api/v2/batches/<task_id>/results" `
   -Headers @{ "x-api-key" = "your-crawler-api-key" }
 ```
+
+结果文件：
+
+- 主状态接口只看进度和错误：`GET /api/v2/batches/<task_id>`
+- 结果接口返回扁平 `records`：`GET /api/v2/batches/<task_id>/results`
+- 本地结果统一保存到 `data/tasks/<task_id>/records.json`
+- 单条原始结果保存到 `data/tasks/<task_id>/raw/*.json`
+- 不再生成 `summary.json` 和按平台拆分的批次结果文件
 
 任务超时：
 

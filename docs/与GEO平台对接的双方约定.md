@@ -151,7 +151,8 @@ Content-Type: application/json
   "status": "pending",
   "expected_records": 6,
   "expected_batches": 2,
-  "output_file": "..."
+  "output_file": "data/tasks/20260418_xxx/records.json",
+  "records_path": "data/tasks/20260418_xxx/records.json"
 }
 ```
 
@@ -201,10 +202,11 @@ GET /api/v2/batches/{task_id}
 - `current_repeat_index`
 - `current_prompt_index`
 - `current_prompt`
-- `platform_batches`
-- `results`
+- `records_path`
 - `callback`
 - `error`
+
+不再返回 `summary_path`，也不再把 `platform_batches` 作为主数据结构。
 
 ### 结果接口
 
@@ -217,8 +219,23 @@ GET /api/v2/batches/{task_id}/results
 用途约定：
 
 - 主要用于 GEO 的日志展示和排错
-- GEO 目前也会用它同步 step / device_result 细节
+- GEO 用它同步扁平 records 明细
 - 但任务是否完成，不能只靠它推断，仍要结合 callback 与 GEO 自己的状态机
+
+返回结构：
+
+```json
+{
+  "task_id": "wuying-xxx",
+  "status": "succeeded",
+  "records_path": "data/tasks/wuying-xxx/records.json",
+  "records": []
+}
+```
+
+兼容字段：
+
+- `results` 可以存在，但内容必须和 `records` 一致，不能再是嵌套批次结构。
 
 ## callback 约定
 
@@ -359,6 +376,10 @@ x-api-key: {env.callback_api_key}
 
 - 主进度轮询接口：`GET /api/v2/batches/{task_id}`
 - 结果查看/排错补充接口：`GET /api/v2/batches/{task_id}/results`
+- Wuying 本地任务结果统一保存到 `data/tasks/{task_id}/records.json`
+- Wuying 不再生成 `data/batches/{task_id}/summary.json`
+- Wuying 不再生成每个平台/每个 prompt 的嵌套 batch 结果文件
+- callback 上传的 JSON 文件内容来自成功 records，结构与 `records.json` 的单条 record 保持一致
 
 原因：
 
@@ -372,6 +393,7 @@ x-api-key: {env.callback_api_key}
   - `current_repeat_index`
   - `current_prompt_index`
   - `current_prompt`
+  - `records_path`
 - `/results` 更适合 GEO 做日志展示和排错，不适合作为唯一进度判断依据
 
 因此 GEO 最终应按以下方式实现：

@@ -20,7 +20,7 @@ def run_platform_once(
     prompt: str,
     instance_id: str | None = None,
     device: DeviceTarget | None = None,
-    save_result: bool = True,
+    save_result: bool = False,
 ) -> PlatformRunResult:
     workflow = build_workflow(settings, platform_name)
     resolved_instance_id = device.instance_id if device is not None else (instance_id or pick_default_instance(settings))

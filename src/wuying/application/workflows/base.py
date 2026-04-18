@@ -38,7 +38,7 @@ class ChatAppWorkflow(ABC):
         prompt: str,
         device_id: str | None = None,
         adb_endpoint: str | None = None,
-        save_result: bool = True,
+        save_result: bool = False,
     ) -> PlatformRunResult:
         session = DeviceSession(
             settings=self.settings,
@@ -53,7 +53,7 @@ class ChatAppWorkflow(ABC):
         *,
         session: DeviceSession,
         prompt: str,
-        save_result: bool = True,
+        save_result: bool = False,
     ) -> PlatformRunResult:
         started_at = datetime.now(tz=UTC)
         driver = session.ensure_driver()
@@ -81,10 +81,14 @@ class ChatAppWorkflow(ABC):
         extra = self._collect_extra_metadata(driver, prompt=prompt, response=response)
 
         finished_at = datetime.now(tz=UTC)
-        output_path = self._build_output_path(
-            instance_id=session.instance_id,
-            device_id=session.device_id,
-            finished_at=finished_at,
+        output_path = (
+            self._build_output_path(
+                instance_id=session.instance_id,
+                device_id=session.device_id,
+                finished_at=finished_at,
+            )
+            if save_result
+            else None
         )
         result = PlatformRunResult.build(
             platform=self.platform_name,
@@ -93,12 +97,12 @@ class ChatAppWorkflow(ABC):
             prompt=prompt,
             response=response,
             adb_serial=serial,
-            output_path=output_path if save_result else "",
+            output_path=output_path or "",
             started_at=started_at,
             finished_at=finished_at,
             extra=extra,
         )
-        if save_result:
+        if save_result and output_path is not None:
             output_path.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
             logger.info("Saved result to %s", output_path)
         return result
