@@ -27,15 +27,34 @@ class YuanbaoWorkflow(ComposeChatWorkflow):
     def _finalize_response(self, driver: U2Driver, *, prompt: str, response: str) -> str:
         stitched = self._collect_response_with_fast_scroll(driver, prompt=prompt, initial_response=response)
         if stitched and len(self._normalize_text(stitched)) >= len(self._normalize_text(response)):
-            return stitched
+            return self._strip_leading_ui_noise(stitched)
 
-        return self._wait_for_full_visible_response(driver, prompt=prompt, initial_response=response)
+        return self._strip_leading_ui_noise(
+            self._wait_for_full_visible_response(driver, prompt=prompt, initial_response=response)
+        )
 
     def _ensure_new_chat_session(self, driver: U2Driver) -> None:
+        if self._click_top_right_new_chat(driver):
+            time.sleep(0.5)
+            return
+
         if self._click_new_chat_from_drawer(driver):
             time.sleep(0.35)
             return
         raise U2DriverError("Yuanbao new chat button not found in drawer.")
+
+    def _click_top_right_new_chat(self, driver: U2Driver) -> bool:
+        root = driver.dump_hierarchy_root()
+        if self._find_drawer_bounds(root) is not None:
+            return False
+
+        bounds = self._find_top_right_new_chat_bounds(root)
+        if bounds is None:
+            return False
+
+        left, top, right, bottom = bounds
+        self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+        return True
 
     def _click_new_chat_from_drawer(self, driver: U2Driver) -> bool:
         if self._click_new_chat_if_visible(driver):
@@ -63,6 +82,60 @@ class YuanbaoWorkflow(ComposeChatWorkflow):
         left, top, right, bottom = bounds
         self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
         return True
+
+    def _find_drawer_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
+        for node in root.iter("node"):
+            if node.attrib.get("package") != self.app.package_name:
+                continue
+            if node.attrib.get("resource-id") not in {
+                "com.tencent.hunyuan.app.chat:id/cv_drawer_container",
+                "com.tencent.hunyuan.app.chat:id/cv_drawer",
+            }:
+                continue
+
+            bounds = U2Driver._parse_bounds(node.attrib.get("bounds", ""))
+            if bounds is None:
+                continue
+            left, top, right, bottom = bounds
+            if right - left < 250 or bottom - top < 300:
+                continue
+            return bounds
+        return None
+
+    def _find_top_right_new_chat_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
+        app_bounds = self._find_app_bounds(root)
+        if app_bounds is None:
+            return None
+
+        app_left, app_top, app_right, app_bottom = app_bounds
+        max_bottom = app_top + int((app_bottom - app_top) * 0.14)
+        min_left = app_left + int((app_right - app_left) * 0.82)
+        candidates: list[tuple[int, tuple[int, int, int, int]]] = []
+        for node in root.iter("node"):
+            attrs = node.attrib
+            if attrs.get("package") != self.app.package_name:
+                continue
+            if attrs.get("clickable") != "true":
+                continue
+
+            bounds = U2Driver._parse_bounds(attrs.get("bounds", ""))
+            if bounds is None:
+                continue
+            left, top, right, bottom = bounds
+            width = right - left
+            height = bottom - top
+            if width < 24 or height < 24:
+                continue
+            if left < min_left or bottom > max_bottom:
+                continue
+            if width > 120 or height > 120:
+                continue
+            candidates.append((right, bounds))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
 
     def _find_left_top_menu_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
         candidates: list[tuple[int, tuple[int, int, int, int]]] = []
@@ -472,6 +545,13 @@ class YuanbaoWorkflow(ComposeChatWorkflow):
         lines = [" ".join(line.replace("\xa0", " ").split()) for line in value.strip().splitlines()]
         cleaned = "\n".join(line for line in lines if line)
         return cleaned.strip()
+
+    @classmethod
+    def _strip_leading_ui_noise(cls, value: str) -> str:
+        lines = value.strip().splitlines()
+        while lines and cls._is_non_response_text(cls._normalize_text(lines[0])):
+            lines.pop(0)
+        return "\n".join(lines).strip()
 
     def _pick_full_visible_response(self, root: ET.Element, *, prompt: str) -> str:
         prompt_norm = self._normalize_text(prompt)
