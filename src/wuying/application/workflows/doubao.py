@@ -31,7 +31,18 @@ class DoubaoWorkflow(ChatAppWorkflow):
         super()._ensure_chat_input_ready(driver)
 
     def _ensure_new_chat_session(self, driver: U2Driver) -> None:
-        deadline = time.monotonic() + self.NEW_CHAT_WAIT_SECONDS
+        if self._try_ensure_new_chat_session(driver, timeout_seconds=self.NEW_CHAT_WAIT_SECONDS):
+            return
+
+        logger.warning("Doubao new chat button not found; restarting app and retrying once.")
+        self._restart_app_for_recovery(driver)
+        if self._try_ensure_new_chat_session(driver, timeout_seconds=self.NEW_CHAT_WAIT_SECONDS):
+            return
+
+        raise U2DriverError("Doubao new chat button not found.")
+
+    def _try_ensure_new_chat_session(self, driver: U2Driver, *, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             self._handle_update_dialog(driver)
 
@@ -39,7 +50,7 @@ class DoubaoWorkflow(ChatAppWorkflow):
             if new_chat is not None:
                 new_chat.click()
                 time.sleep(0.5)
-                return
+                return True
 
             if self._is_chat_page(driver):
                 back = driver.find_first(self.app.selectors.chat_back_selectors)
@@ -50,7 +61,19 @@ class DoubaoWorkflow(ChatAppWorkflow):
 
             time.sleep(self.NEW_CHAT_POLL_INTERVAL_SECONDS)
 
-        raise U2DriverError("Doubao new chat button not found.")
+        return False
+
+    def _restart_app_for_recovery(self, driver: U2Driver) -> None:
+        try:
+            self.adb.shell(driver.serial, "am", "force-stop", self.app.package_name, timeout=6)
+        except Exception as exc:
+            logger.debug("Doubao force-stop during recovery failed: %s", exc)
+        time.sleep(0.5)
+
+        if not self._start_app_fast(driver):
+            driver.start_app(self.app.package_name, self.app.launch_activity)
+        time.sleep(1.0)
+        self._handle_update_dialog(driver)
 
     def _should_use_action_cache(self, action: str) -> bool:
         return action == "input"
@@ -179,6 +202,14 @@ class DoubaoWorkflow(ChatAppWorkflow):
     def _collect_extra_metadata(self, driver: U2Driver, *, prompt: str, response: str) -> dict[str, object]:
         reference_started_at = time.perf_counter()
         search_summary, reference_keywords, reference_titles = self._collect_reference_metadata(driver)
+        if self._should_recover_hidden_reference_card(response=response, summary=search_summary, titles=reference_titles):
+            logger.info("Doubao inline citation detected without visible reference card; scrolling up to recover it.")
+            if self._scroll_towards_reference_card(driver):
+                retry_summary, retry_keywords, retry_titles = self._collect_reference_metadata(driver)
+                search_summary = retry_summary or search_summary
+                self._extend_unique(reference_keywords, retry_keywords)
+                reference_titles = self._merge_reference_title_lists(reference_titles, retry_titles)
+
         if self._references_incomplete(driver, response=response, summary=search_summary, titles=reference_titles):
             logger.info("Doubao references expected but incomplete; retrying once.")
             self._close_reference_panel_if_open(driver)
@@ -276,6 +307,61 @@ class DoubaoWorkflow(ChatAppWorkflow):
             "expected_count": expected_count,
             "collected_count": collected_count,
         }
+
+    @staticmethod
+    def _should_recover_hidden_reference_card(
+        *,
+        response: str,
+        summary: str | None,
+        titles: list[str],
+    ) -> bool:
+        if summary or titles:
+            return False
+        return "[__LINK_ICON" in response or "[citation:" in response
+
+    def _scroll_towards_reference_card(self, driver: U2Driver) -> bool:
+        for _ in range(3):
+            try:
+                root = driver.dump_hierarchy_root()
+            except Exception:
+                return False
+
+            if self._find_node_by_resource_id(root, self.REFERENCE_TITLE_RESOURCE_ID) is not None:
+                return True
+
+            message_list_bounds = self._extract_message_list_bounds(root)
+            if message_list_bounds is None:
+                try:
+                    width, height = driver.window_size()
+                except Exception:
+                    return False
+                message_list_bounds = (0, int(height * 0.14), width, int(height * 0.80))
+
+            start_x, start_y, end_x, end_y = self._build_swipe_points(
+                message_list_bounds,
+                x_ratio=0.5,
+                start_ratio=0.30,
+                end_ratio=0.82,
+            )
+            try:
+                self.adb.input_swipe(
+                    driver.serial,
+                    start_x=start_x,
+                    start_y=start_y,
+                    end_x=end_x,
+                    end_y=end_y,
+                    duration_ms=220,
+                )
+            except Exception as exc:
+                logger.debug("Doubao reference-card recovery swipe failed: %s", exc)
+                return False
+            time.sleep(0.18)
+
+        try:
+            root = driver.dump_hierarchy_root()
+        except Exception:
+            return False
+        return self._find_node_by_resource_id(root, self.REFERENCE_TITLE_RESOURCE_ID) is not None
 
     def _extract_reference_metadata(self, visible_texts: list[str]) -> tuple[str | None, list[str], list[str]]:
         normalized = [self._normalize_visible_text(item) for item in visible_texts]
