@@ -9,6 +9,8 @@ from wuying.invokers import U2Driver, U2DriverError
 
 class ComposeChatWorkflow(ChatAppWorkflow):
     SEND_SELECTOR_TIMEOUT_SECONDS = 2
+    NEW_CHAT_WAIT_SECONDS = 15
+    NEW_CHAT_POLL_INTERVAL_SECONDS = 0.35
 
     def _send_prompt(self, driver: U2Driver, *, prompt: str) -> None:
         try:
@@ -24,19 +26,28 @@ class ComposeChatWorkflow(ChatAppWorkflow):
         time.sleep(0.2)
 
     def _ensure_new_chat_session(self, driver: U2Driver) -> None:
-        if self._click_new_chat_button(driver):
-            time.sleep(0.35)
-            return
+        deadline = time.monotonic() + self.NEW_CHAT_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            if self._click_new_chat_button(driver):
+                time.sleep(0.5)
+                return
+            time.sleep(self.NEW_CHAT_POLL_INTERVAL_SECONDS)
 
         raise U2DriverError(f"{self.platform_name} new chat button not found.")
 
     def _click_new_chat_button(self, driver: U2Driver) -> bool:
-        button = driver.find_first(self.app.selectors.new_chat_selectors)
-        if button is not None:
-            button.click()
+        root = driver.dump_hierarchy_root()
+
+        selector_bounds = self._find_selector_click_bounds(root, self.app.selectors.new_chat_selectors)
+        if selector_bounds is not None:
+            left, top, right, bottom = selector_bounds
+            self.adb.input_tap(
+                driver.serial,
+                x=(left + right) // 2,
+                y=(top + bottom) // 2,
+            )
             return True
 
-        root = driver.dump_hierarchy_root()
         bounds = self._find_top_right_action_bounds(root)
         if bounds is None:
             return False
@@ -48,6 +59,74 @@ class ComposeChatWorkflow(ChatAppWorkflow):
             y=(top + bottom) // 2,
         )
         return True
+
+    def _find_selector_click_bounds(
+        self,
+        root: ET.Element,
+        selectors: list,
+    ) -> tuple[int, int, int, int] | None:
+        parent_map = {child: parent for parent in root.iter() for child in parent}
+        candidates: list[tuple[int, tuple[int, int, int, int]]] = []
+        for node in root.iter("node"):
+            if node.attrib.get("package") != self.app.package_name:
+                continue
+            if not self._node_matches_any_selector(node, selectors):
+                continue
+
+            bounds = self._nearest_clickable_bounds(node, parent_map)
+            if bounds is None:
+                bounds = U2Driver._parse_bounds(node.attrib.get("bounds", ""))
+            if bounds is None:
+                continue
+
+            left, top, right, bottom = bounds
+            width = right - left
+            height = bottom - top
+            if width <= 0 or height <= 0:
+                continue
+            candidates.append((top * 10_000 - right, bounds))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
+
+    @staticmethod
+    def _node_matches_any_selector(node: ET.Element, selectors: list) -> bool:
+        attrs = node.attrib
+        text = attrs.get("text", "")
+        desc = attrs.get("content-desc", "")
+        cls = attrs.get("class", "")
+        resource_id = attrs.get("resource-id", "")
+        for selector in selectors:
+            if selector.resource_id and selector.resource_id != resource_id:
+                continue
+            if selector.text and selector.text != text:
+                continue
+            if selector.text_contains and selector.text_contains not in text:
+                continue
+            if selector.description and selector.description != desc:
+                continue
+            if selector.description_contains and selector.description_contains not in desc:
+                continue
+            if selector.class_name and selector.class_name != cls:
+                continue
+            return True
+        return False
+
+    @staticmethod
+    def _nearest_clickable_bounds(
+        node: ET.Element,
+        parent_map: dict[ET.Element, ET.Element],
+    ) -> tuple[int, int, int, int] | None:
+        current: ET.Element | None = node
+        while current is not None:
+            if current.attrib.get("clickable") == "true":
+                bounds = U2Driver._parse_bounds(current.attrib.get("bounds", ""))
+                if bounds is not None:
+                    return bounds
+            current = parent_map.get(current)
+        return None
 
     def _tap_compose_trailing_action(self, driver: U2Driver) -> None:
         root = driver.dump_hierarchy_root()
