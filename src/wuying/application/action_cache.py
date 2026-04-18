@@ -16,11 +16,10 @@ class ActionBoundsCache:
         *,
         platform: str,
         package_name: str,
-        serial: str,
         window_size: tuple[int, int],
         action: str,
     ) -> Bounds | None:
-        data = self._read(platform=platform, package_name=package_name, serial=serial, window_size=window_size)
+        data = self._read(platform=platform, package_name=package_name, window_size=window_size)
         raw = data.get(action)
         if not isinstance(raw, list) or len(raw) != 4:
             return None
@@ -37,14 +36,13 @@ class ActionBoundsCache:
         *,
         platform: str,
         package_name: str,
-        serial: str,
         window_size: tuple[int, int],
         action: str,
         bounds: Bounds,
     ) -> None:
         self.root_dir.mkdir(parents=True, exist_ok=True)
-        path = self._path(platform=platform, package_name=package_name, serial=serial, window_size=window_size)
-        data = self._read(platform=platform, package_name=package_name, serial=serial, window_size=window_size)
+        path = self._path(platform=platform, package_name=package_name, window_size=window_size)
+        data = self._read(platform=platform, package_name=package_name, window_size=window_size)
         data[action] = list(bounds)
         tmp_path = path.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -55,12 +53,11 @@ class ActionBoundsCache:
         *,
         platform: str,
         package_name: str,
-        serial: str,
         window_size: tuple[int, int],
         action: str,
     ) -> None:
-        path = self._path(platform=platform, package_name=package_name, serial=serial, window_size=window_size)
-        data = self._read(platform=platform, package_name=package_name, serial=serial, window_size=window_size)
+        path = self._path(platform=platform, package_name=package_name, window_size=window_size)
+        data = self._read(platform=platform, package_name=package_name, window_size=window_size)
         if action not in data:
             return
         data.pop(action, None)
@@ -79,10 +76,9 @@ class ActionBoundsCache:
         *,
         platform: str,
         package_name: str,
-        serial: str,
         window_size: tuple[int, int],
     ) -> dict[str, object]:
-        path = self._path(platform=platform, package_name=package_name, serial=serial, window_size=window_size)
+        path = self._path(platform=platform, package_name=package_name, window_size=window_size)
         if not path.exists():
             return {}
         try:
@@ -96,11 +92,10 @@ class ActionBoundsCache:
         *,
         platform: str,
         package_name: str,
-        serial: str,
         window_size: tuple[int, int],
     ) -> Path:
         width, height = window_size
-        key = self._safe_key(f"{platform}_{package_name}_{serial}_{width}x{height}")
+        key = self._safe_key(f"{platform}_{package_name}_{width}x{height}")
         return self.root_dir / f"{key}.json"
 
     @staticmethod

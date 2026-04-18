@@ -252,7 +252,6 @@ class ChatAppWorkflow(ABC):
         return self.action_cache.get(
             platform=self.platform_name,
             package_name=self.app.package_name,
-            serial=driver.serial,
             window_size=window_size,
             action=action,
         )
@@ -268,7 +267,6 @@ class ChatAppWorkflow(ABC):
             self.action_cache.set(
                 platform=self.platform_name,
                 package_name=self.app.package_name,
-                serial=driver.serial,
                 window_size=window_size,
                 action=action,
                 bounds=bounds,
@@ -282,7 +280,6 @@ class ChatAppWorkflow(ABC):
             self.action_cache.delete(
                 platform=self.platform_name,
                 package_name=self.app.package_name,
-                serial=driver.serial,
                 window_size=window_size,
                 action=action,
             )

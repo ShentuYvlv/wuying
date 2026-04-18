@@ -40,28 +40,10 @@ class YuanbaoWorkflow(ComposeChatWorkflow):
         if self._try_fast_new_chat_session(driver):
             return
 
-        if self._click_top_right_new_chat(driver):
-            time.sleep(0.5)
-            return
-
         if self._click_new_chat_from_drawer(driver):
             time.sleep(0.35)
             return
         raise U2DriverError("Yuanbao new chat button not found in drawer.")
-
-    def _click_top_right_new_chat(self, driver: U2Driver) -> bool:
-        root = driver.dump_hierarchy_root()
-        if self._find_drawer_bounds(root) is not None:
-            return False
-
-        bounds = self._find_top_right_new_chat_bounds(root)
-        if bounds is None:
-            return False
-
-        left, top, right, bottom = bounds
-        self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
-        self._remember_action_bounds(driver, "new_chat", bounds)
-        return True
 
     def _click_new_chat_from_drawer(self, driver: U2Driver) -> bool:
         if self._click_new_chat_if_visible(driver):
@@ -109,41 +91,6 @@ class YuanbaoWorkflow(ComposeChatWorkflow):
                 continue
             return bounds
         return None
-
-    def _find_top_right_new_chat_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
-        app_bounds = self._find_app_bounds(root)
-        if app_bounds is None:
-            return None
-
-        app_left, app_top, app_right, app_bottom = app_bounds
-        max_bottom = app_top + int((app_bottom - app_top) * 0.14)
-        min_left = app_left + int((app_right - app_left) * 0.82)
-        candidates: list[tuple[int, tuple[int, int, int, int]]] = []
-        for node in root.iter("node"):
-            attrs = node.attrib
-            if attrs.get("package") != self.app.package_name:
-                continue
-            if attrs.get("clickable") != "true":
-                continue
-
-            bounds = U2Driver._parse_bounds(attrs.get("bounds", ""))
-            if bounds is None:
-                continue
-            left, top, right, bottom = bounds
-            width = right - left
-            height = bottom - top
-            if width < 24 or height < 24:
-                continue
-            if left < min_left or bottom > max_bottom:
-                continue
-            if width > 120 or height > 120:
-                continue
-            candidates.append((right, bounds))
-
-        if not candidates:
-            return None
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        return candidates[0][1]
 
     def _find_left_top_menu_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
         candidates: list[tuple[int, tuple[int, int, int, int]]] = []
