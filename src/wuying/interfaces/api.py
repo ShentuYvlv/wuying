@@ -176,6 +176,18 @@ def create_app() -> FastAPI:
         except FileNotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="task not found") from exc
 
+    @app.get("/api/v1/workers")
+    def get_workers(_: None = Depends(require_api_key)) -> dict[str, Any]:
+        return {"workers": service.get_worker_statuses()}
+
+    @app.post("/api/v1/workers/{device_id}/restart")
+    def restart_worker(device_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
+        try:
+            worker = service.restart_worker(device_id)
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return {"worker": worker}
+
     return app
 
 

@@ -16,8 +16,10 @@ import httpx
 from wuying.application.batch_models import BatchTaskRequest
 from wuying.application.batch_runner import resolve_batch_devices, run_batch_job
 from wuying.application.device_lease import DeviceLeaseError, DeviceLeaseManager
+from wuying.application.device_pool import load_device_pool
 from wuying.application.geo_watcher_payload import build_geo_watcher_records
 from wuying.application.platform_registry import available_platform_names, get_platform_definition
+from wuying.application.worker_manager import WorkerManager
 from wuying.config import AppSettings
 
 logger = logging.getLogger(__name__)
@@ -137,6 +139,7 @@ class CrawlerTaskService:
             settings.device.device_lease_dir,
             stale_after_seconds=settings.device.device_lease_ttl_seconds,
         )
+        self.worker_manager = WorkerManager(settings)
         self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self._worker: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -145,6 +148,7 @@ class CrawlerTaskService:
         if self._worker is not None and self._worker.is_alive():
             return
         self._stop_event.clear()
+        self.worker_manager.start_all(load_device_pool(self.settings).enabled_devices())
         self._worker = threading.Thread(target=self._worker_loop, name="wuying-task-worker", daemon=True)
         self._worker.start()
 
@@ -153,6 +157,7 @@ class CrawlerTaskService:
         self._queue.put(None)
         if self._worker is not None:
             self._worker.join(timeout=10)
+        self.worker_manager.stop_all()
 
     def submit(self, request: CrawlerTaskRequest) -> dict[str, Any]:
         validate_platform_id(request.platform_id)
@@ -310,6 +315,7 @@ class CrawlerTaskService:
                 record_timeout_seconds=self.record_timeout_seconds,
                 batch_timeout_seconds=self.batch_timeout_seconds,
                 progress_callback=lambda patch: self.store.update(task_id, patch),
+                worker_manager=self.worker_manager,
             )
             task = self.store.update(task_id, batch_result)
         except Exception as exc:
@@ -415,6 +421,13 @@ class CrawlerTaskService:
                 "error": str(exc),
                 "record_count": len(records),
             }
+
+    def get_worker_statuses(self) -> list[dict[str, object]]:
+        return self.worker_manager.statuses()
+
+    def restart_worker(self, device_id: str) -> dict[str, object]:
+        handle = self.worker_manager.restart_worker(device_id)
+        return handle.to_dict()
 
 
 def _build_task_id() -> str:

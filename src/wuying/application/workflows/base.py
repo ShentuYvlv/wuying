@@ -9,6 +9,7 @@ from functools import cached_property
 from pathlib import Path
 
 from wuying.application.action_cache import ActionBoundsCache, Bounds
+from wuying.application.device_session import DeviceSession
 from wuying.config import AppSettings, ChatAppSettings
 from wuying.invokers import AdbClient, U2Driver, U2DriverError, WuyingApiClient
 from wuying.models import AdbEndpoint, PlatformRunResult
@@ -38,12 +39,25 @@ class ChatAppWorkflow(ABC):
         adb_endpoint: str | None = None,
         save_result: bool = True,
     ) -> PlatformRunResult:
-        started_at = datetime.now(tz=UTC)
-        endpoint = self._resolve_endpoint(instance_id, adb_endpoint=adb_endpoint)
-        serial = self.adb.connect(endpoint)
-        self.adb.wait_for_device(serial, timeout_seconds=self.settings.device.adb_ready_timeout_seconds)
+        session = DeviceSession(
+            settings=self.settings,
+            instance_id=instance_id,
+            device_id=device_id,
+            adb_endpoint=adb_endpoint,
+        )
+        return self.run_once_with_session(session=session, prompt=prompt, save_result=save_result)
 
-        driver = U2Driver(serial)
+    def run_once_with_session(
+        self,
+        *,
+        session: DeviceSession,
+        prompt: str,
+        save_result: bool = True,
+    ) -> PlatformRunResult:
+        started_at = datetime.now(tz=UTC)
+        driver = session.ensure_driver()
+        serial = session.ensure_connected()
+
         driver.wake()
         self._ensure_app_foreground(driver)
         self._prepare_foreground_app(driver)
@@ -65,11 +79,15 @@ class ChatAppWorkflow(ABC):
         extra = self._collect_extra_metadata(driver, prompt=prompt, response=response)
 
         finished_at = datetime.now(tz=UTC)
-        output_path = self._build_output_path(instance_id=instance_id, device_id=device_id, finished_at=finished_at)
+        output_path = self._build_output_path(
+            instance_id=session.instance_id,
+            device_id=session.device_id,
+            finished_at=finished_at,
+        )
         result = PlatformRunResult.build(
             platform=self.platform_name,
-            instance_id=instance_id,
-            device_id=device_id,
+            instance_id=session.instance_id,
+            device_id=session.device_id,
             prompt=prompt,
             response=response,
             adb_serial=serial,
