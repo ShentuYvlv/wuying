@@ -245,6 +245,8 @@ class ChatAppWorkflow(ABC):
         return False
 
     def _cached_action_bounds(self, driver: U2Driver, action: str) -> Bounds | None:
+        if not self._should_use_action_cache(action):
+            return None
         try:
             window_size = driver.window_size()
         except Exception:
@@ -260,6 +262,8 @@ class ChatAppWorkflow(ABC):
         self._remember_action_bounds(driver, action, U2Driver.object_bounds(obj))
 
     def _remember_action_bounds(self, driver: U2Driver, action: str, bounds: Bounds | None) -> None:
+        if not self._should_use_action_cache(action):
+            return
         if bounds is None:
             return
         try:
@@ -275,6 +279,8 @@ class ChatAppWorkflow(ABC):
             logger.debug("Failed to cache action bounds: platform=%s action=%s error=%s", self.platform_name, action, exc)
 
     def _forget_action_bounds(self, driver: U2Driver, action: str) -> None:
+        if not self._should_use_action_cache(action):
+            return
         try:
             window_size = driver.window_size()
             self.action_cache.delete(
@@ -378,6 +384,9 @@ class ChatAppWorkflow(ABC):
         )
 
     def _capture_response_baseline_before_send(self) -> bool:
+        return True
+
+    def _should_use_action_cache(self, action: str) -> bool:
         return True
 
     def _finalize_response(self, driver: U2Driver, *, prompt: str, response: str) -> str:

@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 class DoubaoWorkflow(ChatAppWorkflow):
     platform_name = "doubao"
+    NEW_CHAT_WAIT_SECONDS = 8
+    NEW_CHAT_POLL_INTERVAL_SECONDS = 0.35
     REFERENCE_TITLE_RESOURCE_ID = "com.larus.nova:id/tv_reference_title"
     REFERENCE_WRAPPER_RESOURCE_ID = "com.larus.nova:id/ll_reference_title"
     REFERENCE_PANEL_RESOURCE_ID = "com.larus.nova:id/subview_container"
@@ -27,6 +29,31 @@ class DoubaoWorkflow(ChatAppWorkflow):
     def _ensure_chat_input_ready(self, driver: U2Driver) -> None:
         self._handle_update_dialog(driver)
         super()._ensure_chat_input_ready(driver)
+
+    def _ensure_new_chat_session(self, driver: U2Driver) -> None:
+        deadline = time.monotonic() + self.NEW_CHAT_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            self._handle_update_dialog(driver)
+
+            new_chat = driver.find_first(self.app.selectors.new_chat_selectors)
+            if new_chat is not None:
+                new_chat.click()
+                time.sleep(0.5)
+                return
+
+            if self._is_chat_page(driver):
+                back = driver.find_first(self.app.selectors.chat_back_selectors)
+                if back is not None:
+                    back.click()
+                    time.sleep(0.5)
+                    continue
+
+            time.sleep(self.NEW_CHAT_POLL_INTERVAL_SECONDS)
+
+        raise U2DriverError("Doubao new chat button not found.")
+
+    def _should_use_action_cache(self, action: str) -> bool:
+        return action == "input"
 
     def _send_prompt(self, driver: U2Driver, *, prompt: str) -> None:
         try:
