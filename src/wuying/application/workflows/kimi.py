@@ -24,6 +24,9 @@ class KimiWorkflow(ComposeChatWorkflow):
     def __init__(self, settings: AppSettings) -> None:
         super().__init__(settings, settings.kimi)
 
+    def _prepare_foreground_app(self, driver: U2Driver) -> None:
+        self._close_reference_sheet(driver)
+
     def _finalize_response(self, driver: U2Driver, *, prompt: str, response: str) -> str:
         copied = self._wait_for_copy_button_and_read_clipboard(driver, prompt=prompt)
         if copied:
@@ -39,6 +42,9 @@ class KimiWorkflow(ComposeChatWorkflow):
         return self._build_references_payload(summary=summary, items=items)
 
     def _set_prompt_text(self, driver: U2Driver, *, prompt: str) -> None:
+        if self._try_fast_set_prompt_text(driver, prompt=prompt):
+            return
+
         target = self._find_kimi_input_by_label(driver)
         if target is None:
             target = self._find_bottom_edit_text_after_tap(driver)
@@ -46,6 +52,7 @@ class KimiWorkflow(ComposeChatWorkflow):
             super()._set_prompt_text(driver, prompt=prompt)
             return
 
+        self._remember_action_object_bounds(driver, "input", target)
         target.click()
         try:
             target.clear_text()
@@ -124,12 +131,16 @@ class KimiWorkflow(ComposeChatWorkflow):
         return None
 
     def _send_prompt(self, driver: U2Driver, *, prompt: str) -> None:
+        if self._try_fast_send_prompt(driver, prompt=prompt):
+            return
+
         prompt_input_bounds = self._find_prompt_input_bounds(driver.dump_hierarchy_root(), prompt=prompt)
         if prompt_input_bounds is None:
             raise U2DriverError("Kimi prompt was not written into the chat input; stop before clicking function chips.")
 
         try:
-            driver.click(self.app.selectors.send_selectors, timeout_seconds=self.SEND_SELECTOR_TIMEOUT_SECONDS)
+            bounds = driver.click(self.app.selectors.send_selectors, timeout_seconds=self.SEND_SELECTOR_TIMEOUT_SECONDS)
+            self._remember_action_bounds(driver, "send", bounds)
             return
         except U2DriverError:
             pass
@@ -141,6 +152,7 @@ class KimiWorkflow(ComposeChatWorkflow):
 
         left, top, right, bottom = bounds
         self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+        self._remember_action_bounds(driver, "send", bounds)
         time.sleep(0.2)
 
     def _find_prompt_input_bounds(self, root: ET.Element, *, prompt: str) -> tuple[int, int, int, int] | None:
@@ -613,10 +625,18 @@ class KimiWorkflow(ComposeChatWorkflow):
     def _close_reference_sheet(self, driver: U2Driver) -> None:
         root = driver.dump_hierarchy_root()
         bounds = self._find_close_sheet_bounds(root)
-        if bounds is None:
+        if bounds is not None:
+            left, top, right, bottom = bounds
+            self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+            time.sleep(0.1)
             return
-        left, top, right, bottom = bounds
-        self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+
+        _, _, summary_bounds = self._find_reference_summary(root)
+        if summary_bounds is None:
+            return
+
+        left, top, right, _ = summary_bounds
+        self.adb.input_tap(driver.serial, x=(left + right) // 2, y=max(80, top - 80))
         time.sleep(0.1)
 
     def _find_close_sheet_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:

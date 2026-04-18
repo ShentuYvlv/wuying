@@ -5,7 +5,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from collections import Counter
-from typing import Any
+from typing import Any, Callable
 
 from wuying.models import SelectorSpec
 
@@ -20,10 +20,14 @@ class U2Driver:
     MESSAGE_LIST_RESOURCE_ID = "com.larus.nova:id/message_list"
     FIND_POLL_INTERVAL_SECONDS = 0.2
     RESPONSE_POLL_INTERVAL_SECONDS = 0.35
+    RPC_RETRY_COUNT = 2
+    RPC_RETRY_SLEEP_SECONDS = 0.8
+    CONNECT_RETRY_COUNT = 2
+    CONNECT_RETRY_SLEEP_SECONDS = 1.5
 
     def __init__(self, serial: str) -> None:
         self.serial = serial
-        self.device = self._connect(serial)
+        self.device = self._connect_with_retry(serial)
 
     @staticmethod
     def _connect(serial: str) -> Any:
@@ -33,14 +37,59 @@ class U2Driver:
             raise U2DriverError("uiautomator2 is not installed. Install requirements.txt first.") from exc
         return u2.connect(serial)
 
+    @classmethod
+    def _connect_with_retry(cls, serial: str) -> Any:
+        last_exc: Exception | None = None
+        for attempt in range(cls.CONNECT_RETRY_COUNT + 1):
+            try:
+                return cls._connect(serial)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= cls.CONNECT_RETRY_COUNT:
+                    break
+                logger.warning(
+                    "uiautomator2 connect failed: serial=%s retry=%s/%s error=%s",
+                    serial,
+                    attempt + 1,
+                    cls.CONNECT_RETRY_COUNT,
+                    exc,
+                )
+                time.sleep(cls.CONNECT_RETRY_SLEEP_SECONDS)
+        raise U2DriverError(f"uiautomator2 connect failed after recovery: {serial}") from last_exc
+
+    def _reset_connection(self) -> None:
+        try:
+            self.device.reset_uiautomator()
+        except Exception as exc:
+            logger.warning("Failed to reset uiautomator2 for %s before reconnect: %s", self.serial, exc)
+        self.device = self._connect_with_retry(self.serial)
+
+    def _rpc(self, action: str, func: Callable[[], Any]) -> Any:
+        last_exc: Exception | None = None
+        for attempt in range(self.RPC_RETRY_COUNT + 1):
+            try:
+                return func()
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= self.RPC_RETRY_COUNT:
+                    break
+                logger.warning(
+                    "uiautomator2 RPC failed: action=%s serial=%s retry=%s/%s error=%s",
+                    action,
+                    self.serial,
+                    attempt + 1,
+                    self.RPC_RETRY_COUNT,
+                    exc,
+                )
+                self._reset_connection()
+                time.sleep(self.RPC_RETRY_SLEEP_SECONDS)
+        raise U2DriverError(f"uiautomator2 RPC failed after recovery: {action}") from last_exc
+
     def wake(self) -> None:
-        self.device.screen_on()
+        self._rpc("screen_on", lambda: self.device.screen_on())
 
     def current_package(self) -> str:
-        try:
-            current = self.device.app_current()
-        except Exception as exc:
-            raise U2DriverError("Failed to read current foreground app.") from exc
+        current = self._rpc("app_current", lambda: self.device.app_current())
 
         if not isinstance(current, dict):
             return ""
@@ -49,9 +98,9 @@ class U2Driver:
 
     def start_app(self, package_name: str, activity: str | None = None) -> None:
         if activity:
-            self.device.app_start(package_name, activity=activity, wait=True)
+            self._rpc("app_start", lambda: self.device.app_start(package_name, activity=activity, wait=True))
             return
-        self.device.app_start(package_name, wait=True)
+        self._rpc("app_start", lambda: self.device.app_start(package_name, wait=True))
 
     def wait_for_any(self, selectors: list[SelectorSpec], timeout_seconds: int) -> Any:
         deadline = time.monotonic() + timeout_seconds
@@ -77,8 +126,14 @@ class U2Driver:
                 return obj
         return None
 
-    def set_text(self, selectors: list[SelectorSpec], text: str, timeout_seconds: int = 30) -> None:
+    def set_text(
+        self,
+        selectors: list[SelectorSpec],
+        text: str,
+        timeout_seconds: int = 30,
+    ) -> tuple[int, int, int, int] | None:
         target = self.wait_for_any(selectors, timeout_seconds)
+        bounds = self.object_bounds(target)
         target.click()
         try:
             target.clear_text()
@@ -90,21 +145,31 @@ class U2Driver:
             logger.debug("uiautomator2 object set_text failed; trying clipboard paste: %s", exc)
 
         if self.wait_for_input_text(text, timeout_seconds=2):
-            return
+            return bounds
 
         logger.info("set_text did not update focused input; trying clipboard paste fallback.")
         target.click()
         try:
-            self.device.send_keys(text, clear=True)
+            self.send_keys(text, clear=True)
         except Exception as exc:
             raise U2DriverError("Failed to paste text into focused input.") from exc
 
         if not self.wait_for_input_text(text, timeout_seconds=3):
             raise U2DriverError("Text input was not written after set_text and clipboard paste fallback.")
+        return bounds
 
-    def click(self, selectors: list[SelectorSpec], timeout_seconds: int = 30) -> None:
+    def click(self, selectors: list[SelectorSpec], timeout_seconds: int = 30) -> tuple[int, int, int, int] | None:
         target = self.wait_for_any(selectors, timeout_seconds)
+        bounds = self.object_bounds(target)
         target.click()
+        return bounds
+
+    def send_keys(self, text: str, *, clear: bool = True) -> None:
+        self._rpc("send_keys", lambda: self.device.send_keys(text, clear=clear))
+
+    def window_size(self) -> tuple[int, int]:
+        width, height = self._rpc("window_size", lambda: self.device.window_size())
+        return int(width), int(height)
 
     def wait_for_text(self, text: str, *, timeout_seconds: int) -> bool:
         deadline = time.monotonic() + timeout_seconds
@@ -249,7 +314,7 @@ class U2Driver:
         )
 
     def dump_hierarchy_root(self) -> ET.Element:
-        hierarchy = self.device.dump_hierarchy()
+        hierarchy = self._rpc("dump_hierarchy", lambda: self.device.dump_hierarchy())
         try:
             return ET.fromstring(hierarchy)
         except ET.ParseError as exc:
@@ -338,6 +403,28 @@ class U2Driver:
             if isinstance(result, str) and result.strip():
                 return result.strip()
         return ""
+
+    @staticmethod
+    def object_bounds(obj: Any) -> tuple[int, int, int, int] | None:
+        try:
+            info = obj.info
+        except Exception:
+            return None
+        if not isinstance(info, dict):
+            return None
+        bounds = info.get("bounds")
+        if not isinstance(bounds, dict):
+            return None
+        try:
+            left = int(bounds["left"])
+            top = int(bounds["top"])
+            right = int(bounds["right"])
+            bottom = int(bounds["bottom"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if right <= left or bottom <= top:
+            return None
+        return left, top, right, bottom
 
     @staticmethod
     def _normalize_for_match(value: str) -> str:

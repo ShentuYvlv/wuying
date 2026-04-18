@@ -12,20 +12,30 @@ class ComposeChatWorkflow(ChatAppWorkflow):
     NEW_CHAT_WAIT_SECONDS = 15
     NEW_CHAT_POLL_INTERVAL_SECONDS = 0.35
 
+    def _allow_fast_new_chat_session(self) -> bool:
+        return True
+
     def _send_prompt(self, driver: U2Driver, *, prompt: str) -> None:
+        if self._try_fast_send_prompt(driver, prompt=prompt):
+            return
         try:
-            driver.click(
+            bounds = driver.click(
                 self.app.selectors.send_selectors,
                 timeout_seconds=self.SEND_SELECTOR_TIMEOUT_SECONDS,
             )
+            self._remember_action_bounds(driver, "send", bounds)
             return
         except U2DriverError:
             pass
 
-        self._tap_compose_trailing_action(driver)
+        bounds = self._tap_compose_trailing_action(driver)
+        self._remember_action_bounds(driver, "send", bounds)
         time.sleep(0.2)
 
     def _ensure_new_chat_session(self, driver: U2Driver) -> None:
+        if self._try_fast_new_chat_session(driver):
+            return
+
         deadline = time.monotonic() + self.NEW_CHAT_WAIT_SECONDS
         while time.monotonic() < deadline:
             if self._click_new_chat_button(driver):
@@ -46,6 +56,7 @@ class ComposeChatWorkflow(ChatAppWorkflow):
                 x=(left + right) // 2,
                 y=(top + bottom) // 2,
             )
+            self._remember_action_bounds(driver, "new_chat", selector_bounds)
             return True
 
         bounds = self._find_top_right_action_bounds(root)
@@ -58,6 +69,7 @@ class ComposeChatWorkflow(ChatAppWorkflow):
             x=(left + right) // 2,
             y=(top + bottom) // 2,
         )
+        self._remember_action_bounds(driver, "new_chat", bounds)
         return True
 
     def _find_selector_click_bounds(
@@ -128,7 +140,7 @@ class ComposeChatWorkflow(ChatAppWorkflow):
             current = parent_map.get(current)
         return None
 
-    def _tap_compose_trailing_action(self, driver: U2Driver) -> None:
+    def _tap_compose_trailing_action(self, driver: U2Driver) -> tuple[int, int, int, int]:
         root = driver.dump_hierarchy_root()
         app_bounds = self._find_app_bounds(root)
         if app_bounds is None:
@@ -182,6 +194,8 @@ class ComposeChatWorkflow(ChatAppWorkflow):
             raise U2DriverError(f"{self.platform_name} send fallback failed: trailing action button not found.")
 
         self.adb.input_tap(driver.serial, x=best_center[0], y=best_center[1])
+        x, y = best_center
+        return x - 1, y - 1, x + 1, y + 1
 
     def _find_top_right_action_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
         app_bounds = self._find_app_bounds(root)

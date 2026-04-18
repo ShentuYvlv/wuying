@@ -46,6 +46,7 @@ class DoubaoWorkflow(ChatAppWorkflow):
 
         left, top, right, bottom = send_bounds
         self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+        self._remember_action_bounds(driver, "send", send_bounds)
         time.sleep(0.2)
 
     def _handle_update_dialog(self, driver: U2Driver) -> None:

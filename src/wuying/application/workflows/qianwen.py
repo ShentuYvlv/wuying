@@ -35,6 +35,9 @@ class QianwenWorkflow(ComposeChatWorkflow):
     def _capture_response_baseline_before_send(self) -> bool:
         return False
 
+    def _allow_fast_new_chat_session(self) -> bool:
+        return False
+
     def _collect_references(self, driver: U2Driver) -> tuple[str | None, list[dict[str, object]]]:
         opened = False
         try:
@@ -457,6 +460,9 @@ class QianwenWorkflow(ComposeChatWorkflow):
         return candidates[0]
 
     def _ensure_new_chat_session(self, driver: U2Driver) -> None:
+        if self._try_fast_new_chat_session(driver):
+            return
+
         if self._click_new_chat_from_drawer(driver):
             time.sleep(0.35)
             return
@@ -487,6 +493,7 @@ class QianwenWorkflow(ComposeChatWorkflow):
             return False
         left, top, right, bottom = bounds
         self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+        self._remember_action_bounds(driver, "new_chat", bounds)
         return True
 
     def _find_left_top_menu_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
@@ -528,11 +535,15 @@ class QianwenWorkflow(ComposeChatWorkflow):
         return None
 
     def _set_prompt_text(self, driver: U2Driver, *, prompt: str) -> None:
+        if self._try_fast_set_prompt_text(driver, prompt=prompt):
+            return
+
         target = self._find_focused_or_bottom_input(driver)
         if target is None:
             super()._set_prompt_text(driver, prompt=prompt)
             return
 
+        self._remember_action_object_bounds(driver, "input", target)
         target.click()
         try:
             target.clear_text()

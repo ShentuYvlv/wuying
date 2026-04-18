@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from functools import cached_property
 from pathlib import Path
 
+from wuying.application.action_cache import ActionBoundsCache, Bounds
 from wuying.config import AppSettings, ChatAppSettings
 from wuying.invokers import AdbClient, U2Driver, U2DriverError, WuyingApiClient
 from wuying.models import AdbEndpoint, PlatformRunResult
@@ -22,6 +23,7 @@ class ChatAppWorkflow(ABC):
         self.settings = settings
         self.app = app
         self.adb = AdbClient(settings.device)
+        self.action_cache = ActionBoundsCache()
 
     @cached_property
     def api(self) -> WuyingApiClient:
@@ -44,6 +46,7 @@ class ChatAppWorkflow(ABC):
         driver = U2Driver(serial)
         driver.wake()
         self._ensure_app_foreground(driver)
+        self._prepare_foreground_app(driver)
         self._ensure_new_chat_session(driver)
         self._ensure_chat_input_ready(driver)
         self._set_prompt_text(driver, prompt=prompt)
@@ -114,7 +117,9 @@ class ChatAppWorkflow(ABC):
         )
 
     def _ensure_chat_input_ready(self, driver: U2Driver) -> None:
-        if driver.find_first(self.app.selectors.input_selectors) is not None:
+        input_obj = driver.find_first(self.app.selectors.input_selectors)
+        if input_obj is not None:
+            self._remember_action_object_bounds(driver, "input", input_obj)
             return
 
         entry = driver.find_first(self.app.selectors.enter_chat_selectors)
@@ -149,11 +154,160 @@ class ChatAppWorkflow(ABC):
             current_package or "<unknown>",
             self.app.package_name,
         )
+        if self._start_app_fast(driver):
+            return
         driver.start_app(self.app.package_name, self.app.launch_activity)
 
+    def _prepare_foreground_app(self, driver: U2Driver) -> None:
+        return
+
+    def _try_fast_new_chat_session(self, driver: U2Driver) -> bool:
+        if not self._allow_fast_new_chat_session():
+            return False
+        if not self._tap_cached_action(driver, "new_chat"):
+            return False
+        time.sleep(0.25)
+        if self._input_visible_quick(driver, timeout_seconds=1.4):
+            return True
+        self._forget_action_bounds(driver, "new_chat")
+        return False
+
+    def _allow_fast_new_chat_session(self) -> bool:
+        return False
+
+    def _try_fast_set_prompt_text(self, driver: U2Driver, *, prompt: str) -> bool:
+        if not self._tap_cached_action(driver, "input"):
+            return False
+        try:
+            driver.send_keys(prompt, clear=True)
+        except Exception as exc:
+            logger.debug("Fast prompt input failed for %s: %s", self.platform_name, exc)
+            self._forget_action_bounds(driver, "input")
+            return False
+        if driver.wait_for_input_text(prompt, timeout_seconds=0.8):
+            return True
+        self._forget_action_bounds(driver, "input")
+        return False
+
+    def _try_fast_send_prompt(self, driver: U2Driver, *, prompt: str) -> bool:
+        if not self._tap_cached_action(driver, "send"):
+            return False
+        time.sleep(0.2)
+        try:
+            if not driver.wait_for_input_text(prompt, timeout_seconds=0.7):
+                return True
+        except U2DriverError:
+            return True
+        self._forget_action_bounds(driver, "send")
+        return False
+
+    def _tap_cached_action(self, driver: U2Driver, action: str) -> bool:
+        bounds = self._cached_action_bounds(driver, action)
+        if bounds is None:
+            return False
+        left, top, right, bottom = bounds
+        try:
+            self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+            return True
+        except Exception as exc:
+            logger.debug("Cached action tap failed: platform=%s action=%s error=%s", self.platform_name, action, exc)
+            return False
+
+    def _input_visible_quick(self, driver: U2Driver, *, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                input_obj = driver.find_first(self.app.selectors.input_selectors)
+            except Exception:
+                input_obj = None
+            if input_obj is not None:
+                self._remember_action_object_bounds(driver, "input", input_obj)
+                return True
+            time.sleep(0.15)
+        return False
+
+    def _cached_action_bounds(self, driver: U2Driver, action: str) -> Bounds | None:
+        try:
+            window_size = driver.window_size()
+        except Exception:
+            return None
+        return self.action_cache.get(
+            platform=self.platform_name,
+            package_name=self.app.package_name,
+            serial=driver.serial,
+            window_size=window_size,
+            action=action,
+        )
+
+    def _remember_action_object_bounds(self, driver: U2Driver, action: str, obj: object) -> None:
+        self._remember_action_bounds(driver, action, U2Driver.object_bounds(obj))
+
+    def _remember_action_bounds(self, driver: U2Driver, action: str, bounds: Bounds | None) -> None:
+        if bounds is None:
+            return
+        try:
+            window_size = driver.window_size()
+            self.action_cache.set(
+                platform=self.platform_name,
+                package_name=self.app.package_name,
+                serial=driver.serial,
+                window_size=window_size,
+                action=action,
+                bounds=bounds,
+            )
+        except Exception as exc:
+            logger.debug("Failed to cache action bounds: platform=%s action=%s error=%s", self.platform_name, action, exc)
+
+    def _forget_action_bounds(self, driver: U2Driver, action: str) -> None:
+        try:
+            window_size = driver.window_size()
+            self.action_cache.delete(
+                platform=self.platform_name,
+                package_name=self.app.package_name,
+                serial=driver.serial,
+                window_size=window_size,
+                action=action,
+            )
+        except Exception as exc:
+            logger.debug("Failed to clear action bounds: platform=%s action=%s error=%s", self.platform_name, action, exc)
+
+    def _start_app_fast(self, driver: U2Driver) -> bool:
+        try:
+            if self.app.launch_activity:
+                component = f"{self.app.package_name}/{self.app.launch_activity}"
+                self.adb.shell(driver.serial, "am", "start", "-n", component, timeout=6)
+            else:
+                self.adb.shell(
+                    driver.serial,
+                    "monkey",
+                    "-p",
+                    self.app.package_name,
+                    "-c",
+                    "android.intent.category.LAUNCHER",
+                    "1",
+                    timeout=6,
+                )
+        except Exception as exc:
+            logger.debug("Fast app start failed for %s: %s", self.platform_name, exc)
+            return False
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            try:
+                if driver.current_package() == self.app.package_name:
+                    return True
+            except U2DriverError:
+                pass
+            time.sleep(0.25)
+        return False
+
     def _ensure_new_chat_session(self, driver: U2Driver) -> None:
+        if self._try_fast_new_chat_session(driver):
+            return
+
         new_chat = driver.find_first(self.app.selectors.new_chat_selectors)
         if new_chat is not None:
+            self._remember_action_object_bounds(driver, "new_chat", new_chat)
             new_chat.click()
             time.sleep(0.5)
             return
@@ -175,6 +329,7 @@ class ChatAppWorkflow(ABC):
         except U2DriverError:
             new_chat = driver.find_first(self.app.selectors.new_chat_selectors)
         if new_chat is not None:
+            self._remember_action_object_bounds(driver, "new_chat", new_chat)
             new_chat.click()
             time.sleep(0.5)
 
@@ -188,10 +343,16 @@ class ChatAppWorkflow(ABC):
         return False
 
     def _send_prompt(self, driver: U2Driver, *, prompt: str) -> None:
-        driver.click(self.app.selectors.send_selectors, timeout_seconds=30)
+        if self._try_fast_send_prompt(driver, prompt=prompt):
+            return
+        bounds = driver.click(self.app.selectors.send_selectors, timeout_seconds=30)
+        self._remember_action_bounds(driver, "send", bounds)
 
     def _set_prompt_text(self, driver: U2Driver, *, prompt: str) -> None:
-        driver.set_text(self.app.selectors.input_selectors, prompt, timeout_seconds=30)
+        if self._try_fast_set_prompt_text(driver, prompt=prompt):
+            return
+        bounds = driver.set_text(self.app.selectors.input_selectors, prompt, timeout_seconds=30)
+        self._remember_action_bounds(driver, "input", bounds)
 
     def _capture_response_baseline(self, driver: U2Driver) -> list[str] | None:
         if not self._capture_response_baseline_before_send():

@@ -57,7 +57,15 @@ class AdbClient:
         self._run([self.settings.adb_path, "disconnect", serial], timeout=10)
 
     def shell(self, serial: str, *parts: str, timeout: int = 30) -> str:
-        return self._run([self.settings.adb_path, "-s", serial, "shell", *parts], timeout=timeout)
+        command = [self.settings.adb_path, "-s", serial, "shell", *parts]
+        try:
+            return self._run(command, timeout=timeout)
+        except AdbError as exc:
+            if not self._is_recoverable_shell_failure(str(exc)):
+                raise
+            logger.warning("ADB shell failed for %s; reconnecting serial and retrying once: %s", serial, exc)
+            self._reconnect_serial(serial)
+            return self._run(command, timeout=timeout)
 
     def input_swipe(
         self,
@@ -132,6 +140,18 @@ class AdbClient:
     def is_connected(self, serial: str) -> bool:
         state = self.list_devices().get(serial)
         return state == "device"
+
+    def _reconnect_serial(self, serial: str) -> None:
+        try:
+            self._run([self.settings.adb_path, "disconnect", serial], timeout=10)
+        except AdbError as exc:
+            logger.debug("adb disconnect before reconnect ignored for %s: %s", serial, exc)
+
+        endpoint = self._endpoint_from_serial(serial)
+        if endpoint is None:
+            self.ensure_server(force_restart=True)
+            return
+        self.connect(endpoint)
 
     def install_apk(
         self,
@@ -227,3 +247,32 @@ class AdbClient:
     def _has_authentication_failure(message: str) -> bool:
         normalized = message.lower()
         return "failed to authenticate" in normalized or "authentication failed" in normalized
+
+    @staticmethod
+    def _is_recoverable_shell_failure(message: str) -> bool:
+        normalized = message.lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "command timed out",
+                "device offline",
+                "device unauthorized",
+                "device not found",
+                "closed",
+                "connection reset",
+                "cannot connect",
+            )
+        )
+
+    @staticmethod
+    def _endpoint_from_serial(serial: str) -> AdbEndpoint | None:
+        if ":" not in serial:
+            return None
+        host, port_raw = serial.rsplit(":", 1)
+        try:
+            port = int(port_raw)
+        except ValueError:
+            return None
+        if not host:
+            return None
+        return AdbEndpoint(instance_id=serial, host=host, port=port, source="reconnect")

@@ -21,6 +21,9 @@ class YuanbaoWorkflow(ComposeChatWorkflow):
     def __init__(self, settings: AppSettings) -> None:
         super().__init__(settings, settings.yuanbao)
 
+    def _allow_fast_new_chat_session(self) -> bool:
+        return False
+
     def _collect_extra_metadata(self, driver: U2Driver, *, prompt: str, response: str) -> dict[str, object]:
         return self._build_references_payload()
 
@@ -34,6 +37,9 @@ class YuanbaoWorkflow(ComposeChatWorkflow):
         )
 
     def _ensure_new_chat_session(self, driver: U2Driver) -> None:
+        if self._try_fast_new_chat_session(driver):
+            return
+
         if self._click_top_right_new_chat(driver):
             time.sleep(0.5)
             return
@@ -54,6 +60,7 @@ class YuanbaoWorkflow(ComposeChatWorkflow):
 
         left, top, right, bottom = bounds
         self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+        self._remember_action_bounds(driver, "new_chat", bounds)
         return True
 
     def _click_new_chat_from_drawer(self, driver: U2Driver) -> bool:
@@ -81,6 +88,7 @@ class YuanbaoWorkflow(ComposeChatWorkflow):
             return False
         left, top, right, bottom = bounds
         self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+        self._remember_action_bounds(driver, "new_chat", bounds)
         return True
 
     def _find_drawer_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
@@ -179,11 +187,15 @@ class YuanbaoWorkflow(ComposeChatWorkflow):
         return None
 
     def _set_prompt_text(self, driver: U2Driver, *, prompt: str) -> None:
+        if self._try_fast_set_prompt_text(driver, prompt=prompt):
+            return
+
         target = self._find_focused_or_bottom_input(driver)
         if target is None:
             super()._set_prompt_text(driver, prompt=prompt)
             return
 
+        self._remember_action_object_bounds(driver, "input", target)
         target.click()
         try:
             target.clear_text()
@@ -206,8 +218,12 @@ class YuanbaoWorkflow(ComposeChatWorkflow):
         return self._focused_edit_text(driver)
 
     def _send_prompt(self, driver: U2Driver, *, prompt: str) -> None:
+        if self._try_fast_send_prompt(driver, prompt=prompt):
+            return
+
         try:
-            driver.click(self.app.selectors.send_selectors, timeout_seconds=self.SEND_SELECTOR_TIMEOUT_SECONDS)
+            bounds = driver.click(self.app.selectors.send_selectors, timeout_seconds=self.SEND_SELECTOR_TIMEOUT_SECONDS)
+            self._remember_action_bounds(driver, "send", bounds)
             return
         except U2DriverError:
             pass
@@ -223,6 +239,7 @@ class YuanbaoWorkflow(ComposeChatWorkflow):
 
         left, top, right, bottom = bounds
         self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+        self._remember_action_bounds(driver, "send", bounds)
         time.sleep(0.2)
 
     def _find_prompt_input_bounds(self, root: ET.Element, *, prompt: str) -> tuple[int, int, int, int] | None:
