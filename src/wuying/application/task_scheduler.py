@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,14 +36,16 @@ def run_batch_job_with_workers(
         deadline = datetime.now(tz=UTC).timestamp() + batch_timeout_seconds
 
     task_root_dir = _task_root_dir(settings, task_id)
-    records_path = _records_path(task_root_dir)
     raw_dir = task_root_dir / "raw"
+    prompt_dir = task_root_dir / "prompts"
+    file_stamp = datetime.now().strftime("%Y-%m-%d-%H")
     task_root_dir.mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
-    _write_records_file(records_path, [])
+    prompt_dir.mkdir(parents=True, exist_ok=True)
     worker_manager.start_all(devices)
 
     records: list[dict[str, object]] = []
+    prompt_files: list[dict[str, object]] = []
     finished_records = 0
     failed_records = 0
     finished_batches = 0
@@ -106,12 +109,13 @@ def run_batch_job_with_workers(
                         failed_records += 1
                         last_error = device_result.error or last_error
 
-                _write_records_file(records_path, records)
+                prompt_files = _write_prompt_result_files(prompt_dir, records, file_stamp=file_stamp)
                 if progress_callback is not None:
                     progress_callback(
                         {
-                            "records_path": str(records_path),
-                            "output_file": str(records_path),
+                            "records_path": None,
+                            "output_file": str(prompt_dir),
+                            "prompt_files": prompt_files,
                             "finished_records": finished_records,
                             "failed_records": failed_records,
                             "finished_batches": finished_batches,
@@ -135,7 +139,7 @@ def run_batch_job_with_workers(
         failed_batches=failed_batches,
         stopped_reason=stopped_reason,
     )
-    _write_records_file(records_path, records)
+    prompt_files = _write_prompt_result_files(prompt_dir, records, file_stamp=file_stamp)
 
     return {
         "task_id": task_id,
@@ -143,8 +147,9 @@ def run_batch_job_with_workers(
         "started_at": started_at,
         "finished_at": finished_at,
         "records": records,
-        "records_path": str(records_path),
-        "output_file": str(records_path),
+        "records_path": None,
+        "output_file": str(prompt_dir),
+        "prompt_files": prompt_files,
         "finished_records": finished_records,
         "failed_records": failed_records,
         "finished_batches": finished_batches,
@@ -304,13 +309,9 @@ def _build_output_record(record: DeviceRunRecord, *, raw_dir: Path) -> dict[str,
     result = dict(record.result or {})
     response = str(result.get("response") or "") if result else ""
     references = result.get("references") if isinstance(result.get("references"), dict) else _empty_references()
-    raw_output_path: str | None = None
     platform_extra = result.get("platform_extra") if isinstance(result.get("platform_extra"), dict) else {}
 
-    if result:
-        raw_output_path = str(_write_raw_result(record, result, raw_dir=raw_dir))
-
-    return {
+    output_record = {
         "platform_id": f"wuying-{record.platform}",
         "platform": record.platform,
         "device_id": record.device_id,
@@ -321,36 +322,27 @@ def _build_output_record(record: DeviceRunRecord, *, raw_dir: Path) -> dict[str,
         "prompt_index": record.prompt_index,
         "repeat_index": record.repeat_index,
         "response": response,
-        **MOCK_METRICS,
-        "attitude": MOCK_ATTITUDE,
         "references": references,
-        "raw_output_path": raw_output_path,
+        "raw_output_path": None,
         "status": record.status,
         "error": record.error,
         "started_at": record.started_at,
         "finished_at": record.finished_at,
         "platform_extra": platform_extra,
     }
+    output_record["raw_output_path"] = str(_write_raw_record(record, output_record, raw_dir=raw_dir))
+    return output_record
 
 
-def _write_raw_result(record: DeviceRunRecord, result: dict[str, object], *, raw_dir: Path) -> Path:
+def _write_raw_record(record: DeviceRunRecord, payload: dict[str, object], *, raw_dir: Path) -> Path:
     raw_path = raw_dir / (
         f"{_safe_filename_part(record.platform)}_"
         f"{_safe_filename_part(record.device_id)}_"
         f"p{record.prompt_index:03d}_r{record.repeat_index:03d}.json"
     )
-    payload = dict(result)
-    payload["platform"] = record.platform
-    payload["platform_id"] = f"wuying-{record.platform}"
-    payload["device_id"] = record.device_id
-    payload["instance_id"] = record.instance_id
-    payload["adb_endpoint"] = record.adb_endpoint
-    payload["prompt_index"] = record.prompt_index
-    payload["repeat_index"] = record.repeat_index
-    payload["status"] = record.status
-    payload["error"] = record.error
-    payload["output_path"] = str(raw_path)
-    raw_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    raw_payload = dict(payload)
+    raw_payload["raw_output_path"] = str(raw_path)
+    _write_json_atomic(raw_path, raw_payload)
     return raw_path
 
 
@@ -358,15 +350,101 @@ def _task_root_dir(settings: AppSettings, task_id: str) -> Path:
     return settings.batch_output_dir.parent / "tasks" / task_id
 
 
-def _records_path(task_root_dir: Path) -> Path:
-    return task_root_dir / "records.json"
+def _write_prompt_result_files(
+    prompt_dir: Path,
+    records: list[dict[str, object]],
+    *,
+    file_stamp: str,
+) -> list[dict[str, object]]:
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    grouped: dict[tuple[str, int, str], list[dict[str, object]]] = {}
+    for record in records:
+        platform = str(record.get("platform") or "").strip()
+        prompt = str(record.get("prompt") or record.get("query") or "").strip()
+        if not platform or not prompt:
+            continue
+        prompt_index = _coerce_int(record.get("prompt_index"), default=0)
+        grouped.setdefault((platform, prompt_index, prompt), []).append(record)
+
+    current_paths: set[Path] = set()
+    prompt_files: list[dict[str, object]] = []
+    for (platform, prompt_index, prompt), prompt_records in sorted(
+        grouped.items(),
+        key=lambda item: (item[0][1], item[0][0], item[0][2]),
+    ):
+        output_path = prompt_dir / _prompt_result_filename(
+            file_stamp=file_stamp,
+            platform=platform,
+            prompt_index=prompt_index,
+            prompt=prompt,
+        )
+        prompt_payload = _apply_prompt_metrics(prompt_records)
+        _write_json_atomic(output_path, prompt_payload)
+        current_paths.add(output_path)
+        prompt_files.append(
+            {
+                "platform": platform,
+                "platform_id": f"wuying-{platform}",
+                "prompt_index": prompt_index,
+                "prompt": prompt,
+                "path": str(output_path),
+                "record_count": len(prompt_records),
+            }
+        )
+
+    for stale_path in prompt_dir.glob("*.json"):
+        if stale_path not in current_paths:
+            try:
+                stale_path.unlink(missing_ok=True)
+            except PermissionError:
+                logger.warning("Prompt result file is locked and cannot be removed: %s", stale_path)
+
+    return prompt_files
 
 
-def _write_records_file(records_path: Path, records: list[dict[str, object]]) -> None:
-    records_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = records_path.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(records_path)
+def _apply_prompt_metrics(prompt_records: list[dict[str, object]]) -> list[dict[str, object]]:
+    metrics = _calculate_prompt_metrics(prompt_records)
+    return [{**record, **metrics} for record in prompt_records]
+
+
+def _calculate_prompt_metrics(prompt_records: list[dict[str, object]]) -> dict[str, object]:
+    # TODO: Replace this placeholder with the real GEO metric calculation.
+    return {**MOCK_METRICS, "attitude": MOCK_ATTITUDE}
+
+
+def _prompt_result_filename(*, file_stamp: str, platform: str, prompt_index: int, prompt: str) -> str:
+    platform_part = _safe_filename_part(platform)[:40]
+    prompt_part = _safe_filename_part(prompt)[:80]
+    return f"{file_stamp}-{platform_part}-p{prompt_index:03d}-{prompt_part}.json"
+
+
+def _coerce_int(value: object, *, default: int) -> int:
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _write_json_atomic(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    for attempt in range(5):
+        try:
+            tmp_path.replace(path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                path.write_text(content, encoding="utf-8")
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except PermissionError:
+                    logger.warning("Temporary result file is locked and cannot be removed: %s", tmp_path)
+                return
+            time.sleep(0.2)
 
 
 def _safe_filename_part(value: str) -> str:

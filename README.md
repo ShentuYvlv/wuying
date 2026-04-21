@@ -76,8 +76,9 @@ $env:ADB_VENDOR_KEYS="E:\all code\C一念\wuying\platform-tools\adbkey"
 - 设备池默认配置文件是 [device_pool.json](E:/all code/C一念/wuying/config/device_pool.json)
 - 设备池只区分 `device_id / instance_id / adb_endpoint`，不单独配置密钥对；密钥对和 `adbkey` 继续走全局 `.env`
 - 执行顺序固定是：`平台 -> prompt -> 设备并发`
-- 多设备、多平台、多 prompt 的最终结果统一汇总到 `data/tasks/<task_id>/records.json`
-- 单条原始结果保存到 `data/tasks/<task_id>/raw/*.json`
+- 新任务不再生成 `records.json`
+- 最终业务结果按 `平台 + prompt` 拆分到 `data/tasks/<task_id>/prompts/*.json`
+- 单条原始结果和失败记录保存到 `data/tasks/<task_id>/raw/*.json`
 - `data/runs` 已废弃，不再作为任何模式的输出目录
 
 ## API 运行
@@ -203,10 +204,12 @@ Invoke-RestMethod `
 结果文件：
 
 - 主状态接口只看进度和错误：`GET /api/v2/batches/<task_id>`
-- 结果接口返回扁平 `records`：`GET /api/v2/batches/<task_id>/results`
-- 本地结果统一保存到 `data/tasks/<task_id>/records.json`
-- 单条原始结果保存到 `data/tasks/<task_id>/raw/*.json`
+- 结果接口从 `raw/*.json` 聚合返回扁平 `records`：`GET /api/v2/batches/<task_id>/results`
+- 新任务不再生成 `data/tasks/<task_id>/records.json`
+- 最终业务结果按平台和 prompt 保存到 `data/tasks/<task_id>/prompts/{年-月-日-时}-{platform}-p{prompt_index}-{prompt}.json`
+- 单条原始结果和失败记录保存到 `data/tasks/<task_id>/raw/*.json`
 - 不再生成 `summary.json` 和按平台拆分的批次结果文件
+- callback 会按平台和 prompt 上传多个 JSON 文件，多个文件使用同一个 multipart 字段名 `files`
 
 任务超时：
 

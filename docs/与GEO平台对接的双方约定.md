@@ -151,8 +151,9 @@ Content-Type: application/json
   "status": "pending",
   "expected_records": 6,
   "expected_batches": 2,
-  "output_file": "data/tasks/20260418_xxx/records.json",
-  "records_path": "data/tasks/20260418_xxx/records.json"
+  "output_file": "data/tasks/20260418_xxx/prompts",
+  "records_path": null,
+  "prompt_files": []
 }
 ```
 
@@ -202,7 +203,8 @@ GET /api/v2/batches/{task_id}
 - `current_repeat_index`
 - `current_prompt_index`
 - `current_prompt`
-- `records_path`
+- `records_path`，新任务为 `null`
+- `prompt_files`
 - `callback`
 - `error`
 
@@ -228,7 +230,8 @@ GET /api/v2/batches/{task_id}/results
 {
   "task_id": "wuying-xxx",
   "status": "succeeded",
-  "records_path": "data/tasks/wuying-xxx/records.json",
+  "records_path": null,
+  "prompt_files": [],
   "records": []
 }
 ```
@@ -293,9 +296,9 @@ x-api-key: {env.callback_api_key}
 1. `platform_id` 必须保留在每条 record 上
 2. `device_id` 必须补上
 3. `raw_output_path` 应尽量提供真实可追溯路径；如果当前实现做不到，可先允许为空，但不应伪造
-4. 同一个 callback 文件允许包含：
-   - 多个平台
-   - 同平台同 query 的多设备结果
+4. `raw/*.json` 是原始设备结果，不包含 `提及率 / 前三率 / 置顶率 / 负面提及率 / attitude`
+5. `prompts/*.json` 是最终回传结果，Wuying 在写入该文件前统一补充指标字段
+6. 同一个 callback 文件只包含一个平台和一个 query 的多设备结果
 
 ## 超时与收尾约定
 
@@ -317,8 +320,8 @@ x-api-key: {env.callback_api_key}
 
 当前真实行为必须写清楚：
 
-- 如果整批任务没有任何成功 record，wuying 可以跳过 callback
-- 因此 GEO 不能假设“所有 submitted 任务最终一定会收到 callback”
+- 如果整批任务没有任何 record，wuying 可以跳过 callback
+- 正常只要产生了 raw record，即使全部失败，也会按平台和 prompt 文件 callback
 
 ## GEO 当前已实现的部分
 
@@ -376,10 +379,12 @@ x-api-key: {env.callback_api_key}
 
 - 主进度轮询接口：`GET /api/v2/batches/{task_id}`
 - 结果查看/排错补充接口：`GET /api/v2/batches/{task_id}/results`
-- Wuying 本地任务结果统一保存到 `data/tasks/{task_id}/records.json`
+- Wuying 新任务不再生成 `data/tasks/{task_id}/records.json`
+- Wuying 最终业务结果保存到 `data/tasks/{task_id}/prompts/*.json`
+- Wuying 单条记录和失败记录保存到 `data/tasks/{task_id}/raw/*.json`
 - Wuying 不再生成 `data/batches/{task_id}/summary.json`
 - Wuying 不再生成每个平台/每个 prompt 的嵌套 batch 结果文件
-- callback 上传的 JSON 文件内容来自成功 records，结构与 `records.json` 的单条 record 保持一致
+- callback 上传的 JSON 文件来自 `prompts/*.json`，结构仍是 record 数组
 
 原因：
 
@@ -393,7 +398,8 @@ x-api-key: {env.callback_api_key}
   - `current_repeat_index`
   - `current_prompt_index`
   - `current_prompt`
-  - `records_path`
+  - `records_path`，新任务为 `null`
+  - `prompt_files`
 - `/results` 更适合 GEO 做日志展示和排错，不适合作为唯一进度判断依据
 
 因此 GEO 最终应按以下方式实现：
@@ -401,3 +407,40 @@ x-api-key: {env.callback_api_key}
 1. 轮询进度时调用 `GET /api/v2/batches/{task_id}`
 2. 需要同步 step / device_result 细节时，可额外调用 `GET /api/v2/batches/{task_id}/results`
 3. 任务最终完成判断不能只看 `/results`，仍要结合 callback 和 GEO 自己的状态机
+
+### 2. 按平台和 Prompt 拆分结果文件和 Callback
+
+Wuying 最终业务结果改为按平台和 prompt 拆分。
+
+本地保存结构：
+
+```text
+data/tasks/{task_id}/status.json
+data/tasks/{task_id}/raw/*.json
+data/tasks/{task_id}/prompts/{年-月-日-时}-{platform}-p{prompt_index}-{prompt}.json
+```
+
+最终约定：
+
+1. 新任务不再生成 `records.json`。
+2. `raw/*.json` 是单设备单平台单 prompt 的记录，成功、失败、超时都会写入。
+3. `prompts/*.json` 是最终业务结果，一个平台加一个 prompt 生成一个文件，包含该平台、该 prompt 下所有设备 records。
+4. `/api/v2/batches/{task_id}` 和 `/api/v2/batches/{task_id}/results` 会返回 `prompt_files`。
+5. callback 不再只上传一个 `records.json`。
+6. callback 改为 multipart 多文件上传，多个文件都使用字段名 `files`。
+7. 每个 callback 文件内容仍然是 record 数组，单条 record 结构不变。
+8. 如果某个平台的某个 prompt 全部失败，Wuying 仍会上传该文件，文件内 records 的 `status` 为 `failed` 或 `timeout`。
+
+GEO 需要改：
+
+1. callback 接口支持同名字段 `files` 的多个 JSON 文件。
+2. 不要依赖文件名 `records.json`，新任务不会生成它。
+3. 每个 JSON 文件单独解析，文件内容按 record 数组处理。
+4. 入库仍以单条 record 的 `platform_id`、`platform`、`device_id`、`query` 为准。
+5. 审核队列建议按文件维度展示，一个文件对应一个平台和一个 prompt。
+
+详细说明见：
+
+```text
+docs/按Prompt拆分结果与GEO回传约定.md
+```
