@@ -43,6 +43,15 @@ def run_batch_job_with_workers(
     raw_dir.mkdir(parents=True, exist_ok=True)
     prompt_dir.mkdir(parents=True, exist_ok=True)
     worker_manager.start_all(devices)
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event_type": "batch_started",
+                "message": "Wuying batch started",
+                "status": "running",
+                "started_at": started_at,
+            }
+        )
 
     records: list[dict[str, object]] = []
     prompt_files: list[dict[str, object]] = []
@@ -54,6 +63,17 @@ def run_batch_job_with_workers(
     stopped_reason: str | None = None
 
     for platform in request.platforms:
+        platform_started_at = _utc_now()
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event_type": "platform_started",
+                    "message": f"Platform started: {platform}",
+                    "status": "running",
+                    "current_platform": platform,
+                    "started_at": platform_started_at,
+                }
+            )
         for repeat_index in range(1, request.repeat + 1):
             for prompt_index, prompt in enumerate(request.prompts, start=1):
                 if deadline is not None and datetime.now(tz=UTC).timestamp() > deadline:
@@ -76,14 +96,18 @@ def run_batch_job_with_workers(
                 if progress_callback is not None:
                     progress_callback(
                         {
+                            "event_type": "prompt_started",
+                            "message": f"Prompt started: platform={platform}, prompt_index={prompt_index}",
                             "current_platform": platform,
                             "current_repeat_index": repeat_index,
                             "current_prompt_index": prompt_index,
                             "current_prompt": prompt,
                             "status": "running",
+                            "started_at": _utc_now(),
                         }
                     )
 
+                prompt_started_at = _utc_now()
                 device_results = _run_platform_prompt_on_devices(
                     worker_manager=worker_manager,
                     platform=platform,
@@ -92,6 +116,7 @@ def run_batch_job_with_workers(
                     repeat_index=repeat_index,
                     devices=devices,
                     record_timeout_seconds=record_timeout_seconds,
+                    progress_callback=progress_callback,
                 )
                 batch_status = _aggregate_device_status(device_results)
                 finished_batches += 1
@@ -110,9 +135,18 @@ def run_batch_job_with_workers(
                         last_error = device_result.error or last_error
 
                 prompt_files = _write_prompt_result_files(prompt_dir, records, file_stamp=file_stamp)
+                prompt_finished_at = _utc_now()
+                current_prompt_file = _find_prompt_file(
+                    prompt_files=prompt_files,
+                    platform=platform,
+                    prompt_index=prompt_index,
+                    prompt=prompt,
+                )
                 if progress_callback is not None:
                     progress_callback(
                         {
+                            "event_type": "prompt_finished",
+                            "message": f"Prompt finished: platform={platform}, prompt_index={prompt_index}",
                             "records_path": None,
                             "output_file": str(prompt_dir),
                             "prompt_files": prompt_files,
@@ -125,6 +159,20 @@ def run_batch_job_with_workers(
                             "current_repeat_index": repeat_index,
                             "current_prompt_index": prompt_index,
                             "current_prompt": prompt,
+                            "platform_batches": [
+                                {
+                                    "platform_id": f"wuying-{platform}",
+                                    "platform": platform,
+                                    "prompt_index": prompt_index,
+                                    "repeat_index": repeat_index,
+                                    "prompt": prompt,
+                                    "device_ids": [device.device_id for device in devices],
+                                    "status": batch_status,
+                                    "started_at": prompt_started_at,
+                                    "finished_at": prompt_finished_at,
+                                    "output_path": current_prompt_file,
+                                }
+                            ],
                         }
                     )
 
@@ -132,6 +180,19 @@ def run_batch_job_with_workers(
                 break
         if stopped_reason is not None:
             break
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event_type": "platform_finished",
+                    "message": f"Platform finished: {platform}",
+                    "status": "running",
+                    "current_platform": platform,
+                    "started_at": platform_started_at,
+                    "finished_at": _utc_now(),
+                    "finished_batches": finished_batches,
+                    "failed_batches": failed_batches,
+                }
+            )
 
     finished_at = _utc_now()
     overall_status = _aggregate_overall_status(
@@ -172,10 +233,40 @@ def _run_platform_prompt_on_devices(
     repeat_index: int,
     devices: list[DeviceTarget],
     record_timeout_seconds: int,
+    progress_callback: ProgressCallback | None = None,
 ) -> list[DeviceRunRecord]:
     max_workers = max(1, len(devices))
     results: list[DeviceRunRecord] = []
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"{platform}-devices") as executor:
+        if progress_callback is not None:
+            for device in devices:
+                progress_callback(
+                    {
+                        "event_type": "device_started",
+                        "message": f"Device started: {device.device_id}",
+                        "status": "running",
+                        "current_platform": platform,
+                        "current_repeat_index": repeat_index,
+                        "current_prompt_index": prompt_index,
+                        "current_prompt": prompt,
+                        "record": {
+                            "platform_id": f"wuying-{platform}",
+                            "platform": platform,
+                            "device_id": device.device_id,
+                            "instance_id": device.instance_id,
+                            "adb_endpoint": device.adb_endpoint,
+                            "prompt_index": prompt_index,
+                            "repeat_index": repeat_index,
+                            "query": prompt,
+                            "prompt": prompt,
+                            "status": "running",
+                            "started_at": _utc_now(),
+                            "finished_at": None,
+                            "result_path": None,
+                            "error": None,
+                        },
+                    }
+                )
         future_map = {
             executor.submit(
                 _run_device,
@@ -190,10 +281,43 @@ def _run_platform_prompt_on_devices(
             for device in devices
         }
         for future in as_completed(future_map):
-            results.append(future.result())
+            result = future.result()
+            results.append(result)
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "event_type": "device_finished",
+                        "message": f"Device finished: {result.device_id}",
+                        "status": "running",
+                        "current_platform": platform,
+                        "current_repeat_index": repeat_index,
+                        "current_prompt_index": prompt_index,
+                        "current_prompt": prompt,
+                        "record": _device_progress_record(result),
+                    }
+                )
 
     results.sort(key=lambda item: item.device_id)
     return results
+
+
+def _device_progress_record(record: DeviceRunRecord) -> dict[str, object]:
+    return {
+        "platform_id": f"wuying-{record.platform}",
+        "platform": record.platform,
+        "device_id": record.device_id,
+        "instance_id": record.instance_id,
+        "adb_endpoint": record.adb_endpoint,
+        "prompt_index": record.prompt_index,
+        "repeat_index": record.repeat_index,
+        "query": record.prompt,
+        "prompt": record.prompt,
+        "status": record.status,
+        "started_at": record.started_at,
+        "finished_at": record.finished_at,
+        "result_path": record.result_path,
+        "error": record.error,
+    }
 
 
 def _run_device(
@@ -400,6 +524,24 @@ def _write_prompt_result_files(
                 logger.warning("Prompt result file is locked and cannot be removed: %s", stale_path)
 
     return prompt_files
+
+
+def _find_prompt_file(
+    *,
+    prompt_files: list[dict[str, object]],
+    platform: str,
+    prompt_index: int,
+    prompt: str,
+) -> str | None:
+    for item in prompt_files:
+        if (
+            item.get("platform") == platform
+            and item.get("prompt_index") == prompt_index
+            and item.get("prompt") == prompt
+        ):
+            path = item.get("path")
+            return str(path) if path else None
+    return None
 
 
 def _apply_prompt_metrics(prompt_records: list[dict[str, object]]) -> list[dict[str, object]]:

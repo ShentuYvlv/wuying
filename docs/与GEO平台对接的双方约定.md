@@ -444,3 +444,175 @@ GEO 需要改：
 ```text
 docs/按Prompt拆分结果与GEO回传约定.md
 ```
+
+## 追加修改：实时进度推送与执行耗时
+
+更新时间：2026-04-21
+
+### 目标
+
+1. GEO 后台任务列表和执行日志需要展示每次 run 的执行耗时。
+2. GEO 后台需要尽量实时看到 Wuying 任务进行到哪个平台、哪个 prompt、哪个设备。
+3. Wuying 不再只等最终 callback，而是在执行过程中主动向 GEO 推送进度事件。
+
+### GEO 已做或需要保持的更改
+
+1. 任务列表展示最近一次 run 的执行耗时。
+2. 执行日志的 run 元信息展示执行耗时。
+3. 打开执行日志时，前端每 3 秒刷新 run 明细。
+4. 任务列表和统计卡片每 5 秒刷新一次。
+5. 新增进度接收接口：
+
+```text
+POST /api/integrations/crawler/progress
+```
+
+请求头：
+
+```text
+x-api-key: {CRAWLER_CALLBACK_API_KEY}
+Content-Type: application/json
+```
+
+6. GEO 收到 progress 后：
+   - 根据 `run_id` 定位 `monitoring_task_runs`
+   - 更新 run 的 `crawler_status / current_platform / current_prompt_index / current_repeat_index / expected_batches / finished_batches / failed_batches`
+   - 同步 `steps`
+   - 同步 `device_results`
+   - 写入 run timeline event
+   - 不直接入库业务指标，业务指标仍只在审核通过后入库
+
+### Wuying 需要新增的更改
+
+Wuying 在以下节点主动调用 GEO progress 接口：
+
+1. 整个 batch 开始执行时。
+2. 每个平台开始执行时。
+3. 每个平台执行完成时。
+4. 每个 prompt 开始执行时。
+5. 每个 prompt 执行完成时。
+6. 每个设备开始执行时。
+7. 每个设备执行完成、失败、超时时。
+8. 整个 batch 执行完成、失败、部分失败时。
+
+Wuying progress 地址解析规则：
+
+1. 优先读取请求 `env.progress_url / env.progressUrl / env.callback_progress_url / env.callbackProgressUrl`。
+2. 其次读取服务端环境变量 `CRAWLER_PROGRESS_URL`。
+3. 如果以上都没有，但存在 `CRAWLER_CALLBACK_URL=http://.../api/integrations/crawler/uploads`，则自动推导为 `http://.../api/integrations/crawler/progress`。
+4. progress 鉴权优先读取 `env.progress_api_key / env.progressApiKey`，其次读取 `env.callback_api_key / env.callbackApiKey`，再读取 `CRAWLER_PROGRESS_API_KEY / CRAWLER_CALLBACK_API_KEY`。
+5. progress 推送失败只记录 warning，不阻塞主爬虫任务。
+
+### progress 请求体约定
+
+最小字段：
+
+```json
+{
+  "run_id": "geo-task-id:2026-04-21:13:1",
+  "task_id": "geo-task-id",
+  "crawler_task_id": "wuying-20260421132244-e4d26995",
+  "trace_id": "wuying-20260421132244-e4d26995",
+  "event_type": "device_finished",
+  "message": "设备执行完成",
+  "status": "running",
+  "platform_ids": ["wuying-doubao"],
+  "device_ids": ["北京", "上海", "杭州", "深圳", "杭州2"],
+  "current_platform": "wuying-doubao",
+  "current_repeat_index": 1,
+  "current_prompt_index": 2,
+  "expected_batches": 10,
+  "finished_batches": 3,
+  "failed_batches": 0
+}
+```
+
+如果是设备级进度，应额外带 `record` 或 `records`：
+
+```json
+{
+  "run_id": "geo-task-id:2026-04-21:13:1",
+  "task_id": "geo-task-id",
+  "event_type": "device_finished",
+  "message": "上海设备执行完成",
+  "status": "running",
+  "record": {
+    "platform_id": "wuying-doubao",
+    "platform": "doubao",
+    "device_id": "上海",
+    "prompt_index": 2,
+    "repeat_index": 1,
+    "query": "用户问句",
+    "status": "succeeded",
+    "started_at": "2026-04-21T13:22:44+08:00",
+    "finished_at": "2026-04-21T13:24:10+08:00",
+    "result_path": "data/tasks/.../raw/xxx.json",
+    "error": null
+  }
+}
+```
+
+如果是平台/prompt 级进度，可带 `platform_batches`：
+
+```json
+{
+  "run_id": "geo-task-id:2026-04-21:13:1",
+  "task_id": "geo-task-id",
+  "event_type": "prompt_finished",
+  "message": "Prompt 2 执行完成",
+  "status": "running",
+  "platform_batches": [
+    {
+      "platform_id": "wuying-doubao",
+      "platform_name": "豆包（手机版）",
+      "prompt_index": 2,
+      "repeat_index": 1,
+      "prompt": "用户问句",
+      "device_ids": ["北京", "上海", "杭州", "深圳", "杭州2"],
+      "status": "succeeded",
+      "started_at": "2026-04-21T13:22:44+08:00",
+      "finished_at": "2026-04-21T13:24:10+08:00",
+      "output_path": "data/tasks/.../prompts/xxx.json"
+    }
+  ]
+}
+```
+
+### 状态语义
+
+`status` 建议使用：
+
+- `pending`
+- `running`
+- `succeeded`
+- `partial_failed`
+- `failed`
+- `timeout`
+
+GEO 处理原则：
+
+1. `running/pending` 只更新进度，不入库业务指标。
+2. `failed/timeout` 可以把 run 标记为失败或超时。
+3. `succeeded/partial_failed` 不代表业务已入库；仍要等最终 callback 文件进入审核队列。
+4. 最终业务数据仍以 callback 文件和审核通过为准。
+
+### 执行耗时口径
+
+GEO 前端展示耗时的口径：
+
+```text
+finished_at - started_at
+```
+
+如果 `finished_at` 为空，但任务仍在执行中：
+
+```text
+当前时间 - started_at
+```
+
+因此 Wuying progress 中应尽量提供：
+
+- `started_at`
+- `finished_at`
+
+设备级 record 也应提供各自的 `started_at / finished_at`，便于 GEO 展示每个设备的耗时。

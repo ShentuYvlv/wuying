@@ -347,10 +347,19 @@ class CrawlerTaskService:
                 devices=devices,
                 record_timeout_seconds=self.record_timeout_seconds,
                 batch_timeout_seconds=self.batch_timeout_seconds,
-                progress_callback=lambda patch: self.store.update(task_id, patch),
+                progress_callback=lambda patch: self._handle_progress(task_id, patch),
                 worker_manager=self.worker_manager,
             )
             task = self.store.update(task_id, _without_records(batch_result))
+            self._upload_progress(
+                task=task,
+                patch={
+                    "event_type": "batch_finished",
+                    "message": "Wuying batch finished",
+                    "status": task.get("status"),
+                    "finished_at": task.get("finished_at"),
+                },
+            )
         except Exception as exc:
             logger.exception("Crawler task failed: task_id=%s", task_id)
             task = self.store.update(
@@ -358,6 +367,16 @@ class CrawlerTaskService:
                 {
                     "status": "failed",
                     "finished_at": _utc_now(),
+                    "error": str(exc),
+                },
+            )
+            self._upload_progress(
+                task=task,
+                patch={
+                    "event_type": "batch_failed",
+                    "message": "Wuying batch failed",
+                    "status": "failed",
+                    "finished_at": task.get("finished_at"),
                     "error": str(exc),
                 },
             )
@@ -369,6 +388,45 @@ class CrawlerTaskService:
 
         callback_info = self._upload_callback(task)
         self.store.update(task_id, {"callback": callback_info})
+
+    def _handle_progress(self, task_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        store_patch = _progress_store_patch(patch)
+        task = self.store.update(task_id, store_patch) if store_patch else self.store.get(task_id)
+        self._upload_progress(task=task, patch=patch)
+        return task
+
+    def _upload_progress(self, *, task: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+        progress_url = _resolve_progress_url(task)
+        if not progress_url:
+            return {"status": "skipped", "reason": "missing progress_url"}
+        progress_api_key = _resolve_progress_api_key(task)
+        if not progress_api_key:
+            return {"status": "skipped", "reason": "missing progress_api_key"}
+
+        payload = _build_progress_payload(task=task, patch=patch)
+        try:
+            with httpx.Client(timeout=5.0, trust_env=False) as client:
+                response = client.post(
+                    progress_url,
+                    headers={"x-api-key": progress_api_key, "content-type": "application/json"},
+                    json=payload,
+                )
+                response.raise_for_status()
+            logger.debug(
+                "Progress uploaded: task_id=%s event_type=%s status=%s",
+                task.get("task_id"),
+                payload.get("event_type"),
+                response.status_code,
+            )
+            return {"status": "succeeded", "http_status": response.status_code}
+        except Exception as exc:
+            logger.warning(
+                "Progress upload failed: task_id=%s event_type=%s error=%s",
+                task.get("task_id"),
+                payload.get("event_type"),
+                exc,
+            )
+            return {"status": "failed", "error": str(exc)}
 
     def _upload_callback(self, task: dict[str, Any]) -> dict[str, Any]:
         env = dict(task.get("env") or {})
@@ -454,6 +512,135 @@ class CrawlerTaskService:
 def _build_task_id() -> str:
     stamp = datetime.now(tz=UTC).strftime("%Y%m%d%H%M%S")
     return f"wuying-{stamp}-{uuid4().hex[:8]}"
+
+
+def _resolve_progress_url(task: dict[str, Any]) -> str | None:
+    env = dict(task.get("env") or {})
+    explicit = _first_non_empty(
+        env.get("progress_url"),
+        env.get("progressUrl"),
+        env.get("callback_progress_url"),
+        env.get("callbackProgressUrl"),
+        os.getenv("CRAWLER_PROGRESS_URL"),
+    )
+    if explicit:
+        return explicit
+
+    callback_url = _first_non_empty(
+        env.get("callback_url"),
+        env.get("callbackUrl"),
+        os.getenv("CRAWLER_CALLBACK_URL"),
+    )
+    if not callback_url:
+        return None
+    if callback_url.endswith("/uploads"):
+        return f"{callback_url[:-len('/uploads')]}/progress"
+    return None
+
+
+def _resolve_progress_api_key(task: dict[str, Any]) -> str | None:
+    env = dict(task.get("env") or {})
+    return _first_non_empty(
+        env.get("progress_api_key"),
+        env.get("progressApiKey"),
+        env.get("callback_api_key"),
+        env.get("callbackApiKey"),
+        os.getenv("CRAWLER_PROGRESS_API_KEY"),
+        os.getenv("CRAWLER_CALLBACK_API_KEY"),
+    )
+
+
+def _build_progress_payload(*, task: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    env = dict(task.get("env") or {})
+    current_platform = _api_platform_id_for_value(
+        _first_non_empty(
+            patch.get("current_platform"),
+            task.get("current_platform"),
+        )
+    )
+    payload: dict[str, Any] = {
+        "run_id": _first_non_empty(env.get("run_id"), task.get("task_id")),
+        "task_id": _first_non_empty(env.get("task_id"), task.get("task_id")),
+        "crawler_task_id": task.get("task_id"),
+        "trace_id": task.get("trace_id") or task.get("task_id"),
+        "event_type": patch.get("event_type") or "progress",
+        "message": patch.get("message") or "",
+        "status": patch.get("status") or task.get("status"),
+        "platform_ids": task.get("platform_ids", []),
+        "device_ids": task.get("device_ids", []),
+        "current_platform": current_platform,
+        "current_platform_internal": _first_non_empty(patch.get("current_platform"), task.get("current_platform")),
+        "current_repeat_index": patch.get("current_repeat_index", task.get("current_repeat_index")),
+        "current_prompt_index": patch.get("current_prompt_index", task.get("current_prompt_index")),
+        "current_prompt": patch.get("current_prompt", task.get("current_prompt")),
+        "expected_batches": task.get("expected_batches"),
+        "finished_batches": patch.get("finished_batches", task.get("finished_batches", 0)),
+        "failed_batches": patch.get("failed_batches", task.get("failed_batches", 0)),
+        "expected_records": task.get("expected_records"),
+        "finished_records": patch.get("finished_records", task.get("finished_records", 0)),
+        "failed_records": patch.get("failed_records", task.get("failed_records", 0)),
+        "started_at": patch.get("started_at") or task.get("started_at"),
+        "finished_at": patch.get("finished_at") or task.get("finished_at"),
+        "error": patch.get("error") or task.get("error"),
+    }
+    if "record" in patch:
+        payload["record"] = _normalize_progress_record(patch["record"])
+    if "records" in patch:
+        records = patch["records"]
+        if isinstance(records, list):
+            payload["records"] = [_normalize_progress_record(item) for item in records]
+    if "platform_batches" in patch:
+        platform_batches = patch["platform_batches"]
+        if isinstance(platform_batches, list):
+            payload["platform_batches"] = [_normalize_platform_batch(item) for item in platform_batches]
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def _progress_store_patch(patch: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = {
+        "status",
+        "records_path",
+        "output_file",
+        "prompt_files",
+        "finished_records",
+        "failed_records",
+        "finished_batches",
+        "failed_batches",
+        "error",
+        "current_platform",
+        "current_repeat_index",
+        "current_prompt_index",
+        "current_prompt",
+    }
+    return {key: patch[key] for key in allowed_keys if key in patch}
+
+
+def _normalize_progress_record(value: object) -> object:
+    if not isinstance(value, dict):
+        return value
+    record = dict(value)
+    platform = _first_non_empty(record.get("platform"))
+    record["platform_id"] = _api_platform_id_for_value(_first_non_empty(record.get("platform_id"), platform))
+    if "query" not in record and "prompt" in record:
+        record["query"] = record.get("prompt")
+    return record
+
+
+def _normalize_platform_batch(value: object) -> object:
+    if not isinstance(value, dict):
+        return value
+    item = dict(value)
+    platform = _first_non_empty(item.get("platform"))
+    item["platform_id"] = _api_platform_id_for_value(_first_non_empty(item.get("platform_id"), platform))
+    return item
+
+
+def _api_platform_id_for_value(value: str | None) -> str | None:
+    if not value:
+        return None
+    if value in PLATFORM_ID_TO_INTERNAL_PLATFORM:
+        return value
+    return api_platform_id_for_internal(value)
 
 
 def _first_non_empty(*values: object) -> str | None:

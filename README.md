@@ -91,6 +91,9 @@ $env:ADB_VENDOR_KEYS="E:\all code\C一念\wuying\platform-tools\adbkey"
 SCRAPER_API_KEY=your-crawler-api-key
 CRAWLER_CALLBACK_URL=http://geo-watcher-backend:3005/api/integrations/crawler/uploads
 CRAWLER_CALLBACK_API_KEY=your-callback-api-key
+# 可不填；默认由 uploads 地址推导到 /api/integrations/crawler/progress
+CRAWLER_PROGRESS_URL=http://geo-watcher-backend:3005/api/integrations/crawler/progress
+CRAWLER_PROGRESS_API_KEY=your-callback-api-key
 CRAWLER_RECORD_TIMEOUT_SECONDS=300
 CRAWLER_BATCH_TIMEOUT_SECONDS=3600
 CRAWLER_BATCH_MAX_WORKERS=5
@@ -250,6 +253,9 @@ cp .env.example .env
 SCRAPER_API_KEY=<必须等于 GEO-watcher 的 CRAWLER_API_KEY>
 CRAWLER_CALLBACK_URL=http://geo-watcher-backend:3005/api/integrations/crawler/uploads
 CRAWLER_CALLBACK_API_KEY=<必须等于 GEO-watcher backend 的 CRAWLER_CALLBACK_API_KEY>
+# 可不填；默认由 CRAWLER_CALLBACK_URL 推导为 http://geo-watcher-backend:3005/api/integrations/crawler/progress
+CRAWLER_PROGRESS_URL=http://geo-watcher-backend:3005/api/integrations/crawler/progress
+CRAWLER_PROGRESS_API_KEY=<默认可与 CRAWLER_CALLBACK_API_KEY 一致>
 WUYING_MANUAL_ADB_ENDPOINT=106.14.114.146:100
 WUYING_INSTANCE_IDS=acp-xxxxxxxxxxxxxxxx
 WUYING_REGION_ID=cn-shanghai
