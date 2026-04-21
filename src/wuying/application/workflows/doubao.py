@@ -22,6 +22,7 @@ class DoubaoWorkflow(ChatAppWorkflow):
     REFERENCE_KEYWORD_CONTAINER_RESOURCE_ID = "com.larus.nova:id/sub_keyword_reference"
     REFERENCE_INDEX_RESOURCE_ID = "com.larus.nova:id/tv_reference_index"
     REFERENCE_CONTENT_RESOURCE_ID = "com.larus.nova:id/tv_reference_content"
+    REFERENCE_DISCOVERY_SWIPES = 6
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__(settings, settings.doubao)
@@ -202,22 +203,34 @@ class DoubaoWorkflow(ChatAppWorkflow):
     def _collect_extra_metadata(self, driver: U2Driver, *, prompt: str, response: str) -> dict[str, object]:
         reference_started_at = time.perf_counter()
         search_summary, reference_keywords, reference_titles = self._collect_reference_metadata(driver)
-        if self._should_recover_hidden_reference_card(response=response, summary=search_summary, titles=reference_titles):
-            logger.info("Doubao inline citation detected without visible reference card; scrolling up to recover it.")
-            if self._scroll_towards_reference_card(driver):
-                retry_summary, retry_keywords, retry_titles = self._collect_reference_metadata(driver)
-                search_summary = retry_summary or search_summary
-                self._extend_unique(reference_keywords, retry_keywords)
-                reference_titles = self._merge_reference_title_lists(reference_titles, retry_titles)
+        if self._should_discover_reference_card(response=response, summary=search_summary, titles=reference_titles):
+            logger.info("Doubao reference card not stable on current screen; scanning upward before deciding.")
+            if self._scroll_towards_reference_card(driver, max_swipes=self.REFERENCE_DISCOVERY_SWIPES):
+                search_summary, reference_keywords, reference_titles = self._merge_reference_results(
+                    base_summary=search_summary,
+                    base_keywords=reference_keywords,
+                    base_titles=reference_titles,
+                    retry_result=self._collect_reference_metadata(driver),
+                )
 
         if self._references_incomplete(driver, response=response, summary=search_summary, titles=reference_titles):
             logger.info("Doubao references expected but incomplete; retrying once.")
             self._close_reference_panel_if_open(driver)
             time.sleep(0.25)
-            retry_summary, retry_keywords, retry_titles = self._collect_reference_metadata(driver)
-            search_summary = retry_summary or search_summary
-            self._extend_unique(reference_keywords, retry_keywords)
-            reference_titles = self._merge_reference_title_lists(reference_titles, retry_titles)
+            if self._scroll_towards_reference_card(driver, max_swipes=self.REFERENCE_DISCOVERY_SWIPES):
+                search_summary, reference_keywords, reference_titles = self._merge_reference_results(
+                    base_summary=search_summary,
+                    base_keywords=reference_keywords,
+                    base_titles=reference_titles,
+                    retry_result=self._collect_reference_metadata(driver),
+                )
+            else:
+                search_summary, reference_keywords, reference_titles = self._merge_reference_results(
+                    base_summary=search_summary,
+                    base_keywords=reference_keywords,
+                    base_titles=reference_titles,
+                    retry_result=self._collect_reference_metadata(driver),
+                )
 
         reference_elapsed = time.perf_counter() - reference_started_at
         logger.info(
@@ -309,24 +322,30 @@ class DoubaoWorkflow(ChatAppWorkflow):
         }
 
     @staticmethod
-    def _should_recover_hidden_reference_card(
+    def _should_discover_reference_card(
         *,
         response: str,
         summary: str | None,
         titles: list[str],
     ) -> bool:
-        if summary or titles:
+        if titles:
             return False
-        return "[__LINK_ICON" in response or "[citation:" in response
+        if summary:
+            return True
+        if "[__LINK_ICON" in response or "[citation:" in response:
+            return True
+        # Doubao often renders the reference card above the final answer area.
+        # If the viewport is already at the bottom, no visible citation marker is enough to prove "no references".
+        return True
 
-    def _scroll_towards_reference_card(self, driver: U2Driver) -> bool:
-        for _ in range(3):
+    def _scroll_towards_reference_card(self, driver: U2Driver, *, max_swipes: int = 3) -> bool:
+        for _ in range(max_swipes):
             try:
                 root = driver.dump_hierarchy_root()
             except Exception:
                 return False
 
-            if self._find_node_by_resource_id(root, self.REFERENCE_TITLE_RESOURCE_ID) is not None:
+            if self._page_has_reference_card(root):
                 return True
 
             message_list_bounds = self._extract_message_list_bounds(root)
@@ -361,7 +380,40 @@ class DoubaoWorkflow(ChatAppWorkflow):
             root = driver.dump_hierarchy_root()
         except Exception:
             return False
-        return self._find_node_by_resource_id(root, self.REFERENCE_TITLE_RESOURCE_ID) is not None
+        return self._page_has_reference_card(root)
+
+    def _page_has_reference_card(self, root: ET.Element) -> bool:
+        if self._find_node_by_resource_id(root, self.REFERENCE_TITLE_RESOURCE_ID) is not None:
+            return True
+        if self._find_node_by_resource_id(root, self.REFERENCE_WRAPPER_RESOURCE_ID) is not None:
+            return True
+        for node in root.iter("node"):
+            text = self._normalize_visible_text(node.attrib.get("text", ""))
+            desc = self._normalize_visible_text(node.attrib.get("content-desc", ""))
+            if self._looks_like_search_summary(text) or self._looks_like_search_summary(desc):
+                return True
+            if "参考" in text and "资料" in text:
+                return True
+            if "参考" in desc and "资料" in desc:
+                return True
+        return False
+
+    def _merge_reference_results(
+        self,
+        *,
+        base_summary: str | None,
+        base_keywords: list[str],
+        base_titles: list[str],
+        retry_result: tuple[str | None, list[str], list[str]],
+    ) -> tuple[str | None, list[str], list[str]]:
+        retry_summary, retry_keywords, retry_titles = retry_result
+        merged_keywords = list(base_keywords)
+        self._extend_unique(merged_keywords, retry_keywords)
+        return (
+            retry_summary or base_summary,
+            merged_keywords,
+            self._merge_reference_title_lists(base_titles, retry_titles),
+        )
 
     def _extract_reference_metadata(self, visible_texts: list[str]) -> tuple[str | None, list[str], list[str]]:
         normalized = [self._normalize_visible_text(item) for item in visible_texts]
@@ -421,10 +473,17 @@ class DoubaoWorkflow(ChatAppWorkflow):
 
         expand = driver.find_first(self.settings.doubao.selectors.reference_expand_selectors)
         if expand is None:
-            return search_summary, reference_keywords, reference_titles
-
-        expand.click()
+            if not self._tap_reference_card_from_hierarchy(driver):
+                return search_summary, reference_keywords, reference_titles
+        else:
+            expand.click()
         time.sleep(0.05)
+
+        if not self._reference_panel_visible(driver):
+            self._tap_reference_card_from_hierarchy(driver)
+            time.sleep(0.08)
+        if not self._reference_panel_visible(driver):
+            return search_summary, reference_keywords, reference_titles
 
         latest_summary = search_summary
         latest_keywords = list(reference_keywords)
@@ -450,8 +509,6 @@ class DoubaoWorkflow(ChatAppWorkflow):
             current_max_index = max(page_title_map.keys(), default=0)
 
             if expected_reference_count is not None and len(latest_title_map) >= expected_reference_count:
-                break
-            if expected_reference_count is not None and current_max_index >= expected_reference_count:
                 break
             if added_count == 0 and current_max_index <= last_max_index:
                 stable_rounds += 1
@@ -488,6 +545,51 @@ class DoubaoWorkflow(ChatAppWorkflow):
 
         latest_titles = [title for _, title in sorted(latest_title_map.items())]
         return latest_summary, latest_keywords, latest_titles
+
+    def _reference_panel_visible(self, driver: U2Driver) -> bool:
+        try:
+            root = driver.dump_hierarchy_root()
+        except Exception:
+            return False
+        return self._find_node_by_resource_id(root, self.REFERENCE_PANEL_RESOURCE_ID) is not None
+
+    def _tap_reference_card_from_hierarchy(self, driver: U2Driver) -> bool:
+        try:
+            root = driver.dump_hierarchy_root()
+        except Exception:
+            return False
+
+        bounds = self._find_reference_card_bounds(root)
+        if bounds is None:
+            return False
+
+        left, top, right, bottom = bounds
+        self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+        return True
+
+    def _find_reference_card_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
+        candidates: list[tuple[int, tuple[int, int, int, int]]] = []
+        for node in root.iter("node"):
+            attrs = node.attrib
+            resource_id = attrs.get("resource-id", "")
+            text = self._normalize_visible_text(attrs.get("text", ""))
+            desc = self._normalize_visible_text(attrs.get("content-desc", ""))
+            if resource_id not in {self.REFERENCE_WRAPPER_RESOURCE_ID, self.REFERENCE_TITLE_RESOURCE_ID}:
+                if not self._looks_like_search_summary(text) and not self._looks_like_search_summary(desc):
+                    continue
+
+            bounds = U2Driver._parse_bounds(attrs.get("bounds", ""))
+            if bounds is None:
+                continue
+            left, top, right, bottom = bounds
+            if right <= left or bottom <= top:
+                continue
+            candidates.append((bottom - top, bounds))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
 
     @staticmethod
     def _normalize_visible_text(value: str) -> str:
@@ -637,18 +739,16 @@ class DoubaoWorkflow(ChatAppWorkflow):
     def _reference_scan_rounds(expected_reference_count: int | None) -> int:
         if expected_reference_count is None:
             return 10
-        return max(8, min(16, (expected_reference_count // 8) + 4))
+        return max(10, min(24, (expected_reference_count // 5) + 6))
 
     @staticmethod
     def _reference_quick_swipe_plans(
         expected_reference_count: int | None,
     ) -> list[tuple[float, float, float, int, float]]:
-        plans: list[tuple[float, float, float, int, float]] = [
-            (0.26, 0.89, 0.33, 300, 0.15),
+        return [
+            (0.26, 0.88, 0.34, 220, 0.10),
+            (0.26, 0.88, 0.34, 220, 0.10),
         ]
-        if expected_reference_count is not None and expected_reference_count > 12:
-            plans.append((0.26, 0.95, 0.10, 450, 0.18))
-        return plans
 
     @staticmethod
     def _find_node_by_resource_id(root: ET.Element, resource_id: str) -> ET.Element | None:

@@ -218,14 +218,25 @@ def _run_device(
             timeout_seconds=record_timeout_seconds,
             save_result=False,
         )
+        integrity_error = _result_integrity_error(result)
         finished_at = _utc_now()
-        logger.info(
-            "Device run succeeded: platform=%s device=%s repeat=%s prompt_index=%s",
-            platform,
-            device.device_id,
-            repeat_index,
-            prompt_index,
-        )
+        if integrity_error:
+            logger.warning(
+                "Device run completed with incomplete result: platform=%s device=%s repeat=%s prompt_index=%s error=%s",
+                platform,
+                device.device_id,
+                repeat_index,
+                prompt_index,
+                integrity_error,
+            )
+        else:
+            logger.info(
+                "Device run succeeded: platform=%s device=%s repeat=%s prompt_index=%s",
+                platform,
+                device.device_id,
+                repeat_index,
+                prompt_index,
+            )
         return DeviceRunRecord(
             device_id=device.device_id,
             instance_id=device.instance_id,
@@ -234,10 +245,11 @@ def _run_device(
             prompt=prompt,
             prompt_index=prompt_index,
             repeat_index=repeat_index,
-            status="succeeded",
+            status="failed" if integrity_error else "succeeded",
             started_at=started_at,
             finished_at=finished_at,
             result_path=str(result.get("output_path") or "") or None,
+            error=integrity_error,
             result=result,
         )
     except TimeoutError as exc:
@@ -364,6 +376,29 @@ def _safe_filename_part(value: str) -> str:
 
 def _empty_references() -> dict[str, object]:
     return {"summary": None, "keywords": [], "items": []}
+
+
+def _result_integrity_error(result: dict[str, object]) -> str | None:
+    platform_extra = result.get("platform_extra")
+    if not isinstance(platform_extra, dict):
+        return None
+
+    reference_collection = platform_extra.get("reference_collection")
+    if not isinstance(reference_collection, dict):
+        return None
+
+    status = str(reference_collection.get("status") or "").strip()
+    if status not in {"missing", "partial"}:
+        return None
+
+    expected_count = reference_collection.get("expected_count")
+    collected_count = reference_collection.get("collected_count")
+    if isinstance(expected_count, int):
+        return (
+            "reference collection incomplete: "
+            f"status={status}, expected={expected_count}, collected={collected_count}"
+        )
+    return f"reference collection incomplete: status={status}, collected={collected_count}"
 
 
 def _aggregate_device_status(device_results: list[DeviceRunRecord]) -> str:

@@ -439,7 +439,7 @@ class ChatAppWorkflow(ABC):
             return "empty response"
         if prompt_compact and compact == prompt_compact:
             return "captured prompt instead of answer"
-        if len(compact) < 8 and not self._prompt_allows_short_response(prompt=prompt, response=response):
+        if len(compact) < 8 and not cls._prompt_allows_short_response(prompt=prompt, response=response):
             return "response too short"
         if re.fullmatch(r"\d{1,2}:\d{2}", compact):
             return "captured clock text instead of answer"
