@@ -16,6 +16,11 @@ class DoubaoWorkflow(ChatAppWorkflow):
     platform_name = "doubao"
     NEW_CHAT_WAIT_SECONDS = 8
     NEW_CHAT_POLL_INTERVAL_SECONDS = 0.35
+    PACKAGE_NAME = "com.larus.nova"
+    LAUNCH_COMPONENTS = (
+        "com.larus.nova/com.larus.home.impl.alias.AliasActivity1",
+        "com.larus.nova/com.larus.home.impl.MainActivity",
+    )
     REFERENCE_TITLE_RESOURCE_ID = "com.larus.nova:id/tv_reference_title"
     REFERENCE_WRAPPER_RESOURCE_ID = "com.larus.nova:id/ll_reference_title"
     REFERENCE_PANEL_RESOURCE_ID = "com.larus.nova:id/subview_container"
@@ -35,34 +40,98 @@ class DoubaoWorkflow(ChatAppWorkflow):
         if self._try_ensure_new_chat_session(driver, timeout_seconds=self.NEW_CHAT_WAIT_SECONDS):
             return
 
-        logger.warning("Doubao new chat button not found; restarting app and retrying once.")
-        self._restart_app_for_recovery(driver)
-        if self._try_ensure_new_chat_session(driver, timeout_seconds=self.NEW_CHAT_WAIT_SECONDS):
-            return
+        recovery_steps = (
+            ("leave existing chat page", self._recover_by_leaving_current_chat),
+            ("restart app", self._restart_app_for_recovery),
+            ("remove stale Doubao tasks", self._recover_by_removing_tasks),
+            ("launch home entrypoints", self._recover_by_launching_home_entrypoints),
+        )
+        for step_name, recover in recovery_steps:
+            logger.warning("Doubao new chat button not ready; recovery step: %s", step_name)
+            try:
+                recover(driver)
+            except Exception as exc:
+                logger.debug("Doubao recovery step failed: step=%s error=%s", step_name, exc)
+            if self._try_ensure_new_chat_session(driver, timeout_seconds=self.NEW_CHAT_WAIT_SECONDS):
+                return
 
-        raise U2DriverError("Doubao new chat button not found.")
+        raise U2DriverError(f"Doubao new chat button not found. page={self._current_page_signature(driver)}")
 
     def _try_ensure_new_chat_session(self, driver: U2Driver, *, timeout_seconds: float) -> bool:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             self._handle_update_dialog(driver)
 
-            new_chat = driver.find_first(self.app.selectors.new_chat_selectors)
-            if new_chat is not None:
-                new_chat.click()
-                time.sleep(0.5)
+            if self._looks_like_empty_new_chat(driver):
                 return True
 
-            if self._is_chat_page(driver):
-                back = driver.find_first(self.app.selectors.chat_back_selectors)
-                if back is not None:
-                    back.click()
-                    time.sleep(0.5)
-                    continue
+            if self._tap_new_chat_button(driver):
+                return True
+
+            if self._is_chat_page(driver) and self._try_leave_chat_page_once(driver):
+                continue
 
             time.sleep(self.NEW_CHAT_POLL_INTERVAL_SECONDS)
 
         return False
+
+    def _tap_new_chat_button(self, driver: U2Driver) -> bool:
+        new_chat = driver.find_first(self.app.selectors.new_chat_selectors)
+        if new_chat is not None:
+            self._remember_action_object_bounds(driver, "new_chat", new_chat)
+            new_chat.click()
+            time.sleep(0.5)
+            return True
+
+        bounds = self._tap_first_selector_from_hierarchy(driver, self.app.selectors.new_chat_selectors)
+        if bounds is None:
+            return False
+
+        self._remember_action_bounds(driver, "new_chat", bounds)
+        time.sleep(0.5)
+        return True
+
+    def _try_leave_chat_page_once(self, driver: U2Driver) -> bool:
+        if self._tap_back_button_from_hierarchy(driver):
+            time.sleep(0.5)
+            return True
+
+        back = driver.find_first(self.app.selectors.chat_back_selectors)
+        if back is not None:
+            back.click()
+            time.sleep(0.5)
+            return True
+
+        try:
+            self.adb.shell(driver.serial, "input", "keyevent", "4", timeout=5)
+            time.sleep(0.5)
+            return True
+        except Exception as exc:
+            logger.debug("Doubao keyevent BACK failed while leaving chat page: %s", exc)
+            return False
+
+    def _tap_back_button_from_hierarchy(self, driver: U2Driver) -> bool:
+        try:
+            root = driver.dump_hierarchy_root()
+        except Exception:
+            return False
+
+        bounds = self._find_selector_bounds_in_hierarchy(root, self.app.selectors.chat_back_selectors)
+        if bounds is None:
+            return False
+
+        left, top, right, bottom = bounds
+        self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+        return True
+
+    def _recover_by_leaving_current_chat(self, driver: U2Driver) -> None:
+        for _ in range(3):
+            if not self._is_chat_page(driver):
+                return
+            if self._tap_new_chat_button(driver):
+                return
+            if not self._try_leave_chat_page_once(driver):
+                return
 
     def _restart_app_for_recovery(self, driver: U2Driver) -> None:
         try:
@@ -75,6 +144,100 @@ class DoubaoWorkflow(ChatAppWorkflow):
             driver.start_app(self.app.package_name, self.app.launch_activity)
         time.sleep(1.0)
         self._handle_update_dialog(driver)
+
+    def _recover_by_removing_tasks(self, driver: U2Driver) -> None:
+        task_ids = self._current_doubao_task_ids(driver)
+        for task_id in task_ids:
+            try:
+                self.adb.shell(driver.serial, "cmd", "activity", "remove-task", task_id, timeout=8)
+            except Exception:
+                try:
+                    self.adb.shell(driver.serial, "am", "stack", "remove", task_id, timeout=8)
+                except Exception as exc:
+                    logger.debug("Doubao task removal failed: task_id=%s error=%s", task_id, exc)
+        time.sleep(0.4)
+        self._recover_by_launching_home_entrypoints(driver)
+
+    def _current_doubao_task_ids(self, driver: U2Driver) -> list[str]:
+        try:
+            output = self.adb.shell(driver.serial, "dumpsys", "activity", "activities", timeout=12)
+        except Exception as exc:
+            logger.debug("Doubao task dump failed: %s", exc)
+            return []
+
+        task_ids: list[str] = []
+        for line in output.splitlines():
+            if self.app.package_name not in line:
+                continue
+            for pattern in (r"\bt(\d+)\b", r"#(\d+)\b", r"taskId=(\d+)\b", r"mTaskId=(\d+)\b"):
+                match = re.search(pattern, line)
+                if match and match.group(1) not in task_ids:
+                    task_ids.append(match.group(1))
+        return task_ids[:4]
+
+    def _recover_by_launching_home_entrypoints(self, driver: U2Driver) -> None:
+        for component in self.LAUNCH_COMPONENTS:
+            try:
+                self.adb.shell(driver.serial, "am", "start", "-S", "-n", component, timeout=8)
+                time.sleep(0.8)
+                self._handle_update_dialog(driver)
+                if self._tap_new_chat_button(driver) or self._looks_like_empty_new_chat(driver):
+                    return
+            except Exception as exc:
+                logger.debug("Doubao launch component failed: component=%s error=%s", component, exc)
+
+        if not self._start_app_fast(driver):
+            driver.start_app(self.app.package_name, self.app.launch_activity)
+        time.sleep(1.0)
+        self._handle_update_dialog(driver)
+
+    def _looks_like_empty_new_chat(self, driver: U2Driver) -> bool:
+        try:
+            root = driver.dump_hierarchy_root()
+        except Exception:
+            return False
+
+        if self._find_selector_bounds_in_hierarchy(root, self.app.selectors.new_chat_selectors) is not None:
+            return False
+        if self._find_selector_bounds_in_hierarchy(root, self.app.selectors.input_selectors) is None:
+            return False
+
+        texts = self._visible_texts(root)
+        joined = "\n".join(texts)
+        return "新对话" in joined or "聊聊新话题" in joined
+
+    def _current_page_signature(self, driver: U2Driver) -> dict[str, object]:
+        try:
+            root = driver.dump_hierarchy_root()
+        except Exception as exc:
+            return {"error": str(exc)}
+
+        texts = self._visible_texts(root)
+        resource_ids: list[str] = []
+        for node in root.iter("node"):
+            resource_id = node.attrib.get("resource-id", "")
+            if resource_id and resource_id.startswith(self.PACKAGE_NAME) and resource_id not in resource_ids:
+                resource_ids.append(resource_id)
+            if len(resource_ids) >= 12:
+                break
+
+        return {
+            "texts": texts[:12],
+            "resource_ids": resource_ids,
+            "chat_page": self._find_selector_bounds_in_hierarchy(root, self.app.selectors.input_selectors) is not None,
+        }
+
+    @staticmethod
+    def _visible_texts(root: ET.Element) -> list[str]:
+        texts: list[str] = []
+        seen: set[str] = set()
+        for node in root.iter("node"):
+            for attr in ("text", "content-desc"):
+                value = re.sub(r"\s+", " ", node.attrib.get(attr, "")).strip()
+                if value and value not in seen:
+                    texts.append(value)
+                    seen.add(value)
+        return texts
 
     def _should_use_action_cache(self, action: str) -> bool:
         return action == "input"

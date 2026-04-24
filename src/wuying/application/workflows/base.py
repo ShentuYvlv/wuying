@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
@@ -13,13 +14,31 @@ from wuying.application.action_cache import ActionBoundsCache, Bounds
 from wuying.application.device_session import DeviceSession
 from wuying.config import AppSettings, ChatAppSettings
 from wuying.invokers import AdbClient, U2Driver, U2DriverError, WuyingApiClient
-from wuying.models import AdbEndpoint, PlatformRunResult
+from wuying.models import AdbEndpoint, PlatformRunResult, SelectorSpec
 
 logger = logging.getLogger(__name__)
 
 
 class ChatAppWorkflow(ABC):
     platform_name: str
+    _permission_preflight_lock = threading.Lock()
+    _permission_preflight_done: set[str] = set()
+    _COMMON_RUNTIME_PERMISSIONS = (
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.BLUETOOTH_ADVERTISE",
+        "android.permission.READ_CALENDAR",
+        "android.permission.WRITE_CALENDAR",
+    )
 
     def __init__(self, settings: AppSettings, app: ChatAppSettings) -> None:
         self.settings = settings
@@ -59,6 +78,7 @@ class ChatAppWorkflow(ABC):
         driver = session.ensure_driver()
         serial = session.ensure_connected()
 
+        self._preflight_app_permissions(serial)
         driver.wake()
         self._ensure_app_foreground(driver)
         self._prepare_foreground_app(driver)
@@ -182,8 +202,86 @@ class ChatAppWorkflow(ABC):
             return
         driver.start_app(self.app.package_name, self.app.launch_activity)
 
+    def _preflight_app_permissions(self, serial: str) -> None:
+        key = f"{serial}|{self.app.package_name}"
+        with self._permission_preflight_lock:
+            if key in self._permission_preflight_done:
+                return
+            self._permission_preflight_done.add(key)
+
+        for permission in self._COMMON_RUNTIME_PERMISSIONS:
+            try:
+                self.adb.shell(serial, "pm", "grant", self.app.package_name, permission, timeout=5)
+            except Exception:
+                # The package may not request every permission; best-effort grant is enough.
+                continue
+
     def _prepare_foreground_app(self, driver: U2Driver) -> None:
         return
+
+    def _tap_first_selector_from_hierarchy(
+        self,
+        driver: U2Driver,
+        selectors: list[SelectorSpec],
+    ) -> tuple[int, int, int, int] | None:
+        root = driver.dump_hierarchy_root()
+        bounds = self._find_selector_bounds_in_hierarchy(root, selectors)
+        if bounds is None:
+            return None
+
+        left, top, right, bottom = bounds
+        self.adb.input_tap(driver.serial, x=(left + right) // 2, y=(top + bottom) // 2)
+        return bounds
+
+    def _find_selector_bounds_in_hierarchy(
+        self,
+        root: object,
+        selectors: list[SelectorSpec],
+    ) -> tuple[int, int, int, int] | None:
+        candidates: list[tuple[int, tuple[int, int, int, int]]] = []
+        for selector_index, selector in enumerate(selectors):
+            for node in root.iter("node"):  # type: ignore[attr-defined]
+                if not self._node_matches_selector(node.attrib, selector):
+                    continue
+                bounds = U2Driver._parse_bounds(node.attrib.get("bounds", ""))
+                if bounds is None:
+                    continue
+                left, top, right, bottom = bounds
+                if right <= left or bottom <= top:
+                    continue
+                candidates.append((selector_index * 10_000 - bottom, bounds))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
+
+    @staticmethod
+    def _node_matches_selector(attrs: dict[str, str], selector: SelectorSpec) -> bool:
+        if selector.resource_id and attrs.get("resource-id") != selector.resource_id:
+            return False
+        node_text = attrs.get("text", "")
+        node_desc = attrs.get("content-desc", "")
+        if selector.text and node_text != selector.text:
+            return False
+        if selector.text_contains and selector.text_contains not in node_text:
+            return False
+        if selector.description and node_desc != selector.description:
+            return False
+        if selector.description_contains and selector.description_contains not in node_desc:
+            return False
+        if selector.class_name and attrs.get("class") != selector.class_name:
+            return False
+        return any(
+            (
+                selector.resource_id,
+                selector.text,
+                selector.text_contains,
+                selector.description,
+                selector.description_contains,
+                selector.class_name,
+            )
+        )
 
     def _try_fast_new_chat_session(self, driver: U2Driver) -> bool:
         if not self._allow_fast_new_chat_session():

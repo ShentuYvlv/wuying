@@ -29,6 +29,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-instance-id", "--instance-id", help="Override one instance ID from .env")
     parser.add_argument("-devices", "--devices", help="Comma-separated device IDs from config/device_pool.json")
+    parser.add_argument(
+        "-repeat",
+        "--repeat",
+        type=int,
+        default=1,
+        help="Run each platform/prompt combination N times. Default: 1",
+    )
     prompt_source = parser.add_mutually_exclusive_group(required=True)
     prompt_source.add_argument("-prompt", "--prompt", help="Prompt sent to the selected app")
     prompt_source.add_argument("-file", "--file", help="UTF-8 text file. One non-empty line is one prompt.")
@@ -95,6 +102,8 @@ def run_from_cli(argv: list[str] | None = None) -> int:
         platforms = _parse_platforms(args.platform)
         prompts = _load_prompts(args)
         device_ids = _parse_devices(args.devices)
+        if args.repeat < 1:
+            raise ValueError("--repeat must be >= 1.")
     except Exception as exc:
         parser.error(str(exc))
 
@@ -103,7 +112,7 @@ def run_from_cli(argv: list[str] | None = None) -> int:
     batch_request = BatchTaskRequest(
         platforms=platforms,
         prompts=prompts,
-        repeat=1,
+        repeat=args.repeat,
         save_name=None,
         env={},
         device_ids=device_ids,
@@ -135,6 +144,7 @@ def run_from_cli(argv: list[str] | None = None) -> int:
                 "manual_adb_endpoint": settings.device.manual_adb_endpoint,
                 "adb_path": settings.device.adb_path,
                 "prompt_count": len(prompts),
+                "repeat": args.repeat,
                 "task_id": task_id,
             },
             ensure_ascii=False,
