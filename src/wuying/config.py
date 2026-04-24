@@ -33,6 +33,14 @@ def _get_int(name: str, default: int) -> int:
         raise ValueError(f"Environment variable {name} must be an integer, got {raw!r}") from exc
 
 
+def _get_float(name: str, default: float) -> float:
+    raw = _get_optional(name, str(default))
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"Environment variable {name} must be a float, got {raw!r}") from exc
+
+
 def _get_csv(name: str) -> list[str]:
     raw = _get_optional(name)
     return [item.strip() for item in raw.split(",") if item.strip()]
@@ -170,6 +178,18 @@ class DeviceSettings:
     adb_vendor_keys: str | None
     adb_connect_timeout_seconds: int
     adb_ready_timeout_seconds: int
+    adb_connect_retry_count: int
+    adb_connect_retry_interval_seconds: float
+    adb_connect_confirm_retries: int
+    adb_connect_confirm_interval_seconds: float
+    worker_startup_timeout_seconds: int
+    driver_init_retry_count: int
+    driver_init_retry_sleep_seconds: float
+    u2_connect_retry_count: int
+    u2_connect_retry_sleep_seconds: float
+    u2_connect_attempt_timeout_seconds: float
+    u2_rpc_retry_count: int
+    u2_rpc_retry_sleep_seconds: float
     start_adb_via_api: bool
     manual_adb_endpoint: str | None
     device_pool_file: Path | None
@@ -424,6 +444,18 @@ class AppSettings:
                 adb_vendor_keys=_get_optional("ADB_VENDOR_KEYS") or None,
                 adb_connect_timeout_seconds=_get_int("ADB_CONNECT_TIMEOUT_SECONDS", 30),
                 adb_ready_timeout_seconds=_get_int("ADB_READY_TIMEOUT_SECONDS", 120),
+                adb_connect_retry_count=_get_int("ADB_CONNECT_RETRY_COUNT", 3),
+                adb_connect_retry_interval_seconds=_get_float("ADB_CONNECT_RETRY_INTERVAL_SECONDS", 2.0),
+                adb_connect_confirm_retries=_get_int("ADB_CONNECT_CONFIRM_RETRIES", 3),
+                adb_connect_confirm_interval_seconds=_get_float("ADB_CONNECT_CONFIRM_INTERVAL_SECONDS", 1.0),
+                worker_startup_timeout_seconds=_get_int("WORKER_STARTUP_TIMEOUT_SECONDS", 15),
+                driver_init_retry_count=_get_int("DRIVER_INIT_RETRY_COUNT", 2),
+                driver_init_retry_sleep_seconds=_get_float("DRIVER_INIT_RETRY_SLEEP_SECONDS", 1.5),
+                u2_connect_retry_count=_get_int("U2_CONNECT_RETRY_COUNT", 3),
+                u2_connect_retry_sleep_seconds=_get_float("U2_CONNECT_RETRY_SLEEP_SECONDS", 2.0),
+                u2_connect_attempt_timeout_seconds=_get_float("U2_CONNECT_ATTEMPT_TIMEOUT_SECONDS", 35.0),
+                u2_rpc_retry_count=_get_int("U2_RPC_RETRY_COUNT", 3),
+                u2_rpc_retry_sleep_seconds=_get_float("U2_RPC_RETRY_SLEEP_SECONDS", 1.0),
                 start_adb_via_api=_get_bool("WUYING_START_ADB_VIA_API", True),
                 manual_adb_endpoint=manual_adb_endpoint,
                 device_pool_file=device_pool_file,

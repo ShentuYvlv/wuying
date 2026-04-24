@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import queue
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
 from collections import Counter
 from typing import Any, Callable
 
+from wuying.config import DeviceSettings
 from wuying.models import SelectorSpec
 
 logger = logging.getLogger(__name__)
@@ -18,16 +21,40 @@ class U2DriverError(RuntimeError):
 
 class U2Driver:
     MESSAGE_LIST_RESOURCE_ID = "com.larus.nova:id/message_list"
-    FIND_POLL_INTERVAL_SECONDS = 0.2
-    RESPONSE_POLL_INTERVAL_SECONDS = 0.35
-    RPC_RETRY_COUNT = 2
-    RPC_RETRY_SLEEP_SECONDS = 0.8
-    CONNECT_RETRY_COUNT = 2
-    CONNECT_RETRY_SLEEP_SECONDS = 1.5
+    DEFAULT_FIND_POLL_INTERVAL_SECONDS = 0.2
+    DEFAULT_RESPONSE_POLL_INTERVAL_SECONDS = 0.35
+    DEFAULT_RPC_RETRY_COUNT = 2
+    DEFAULT_RPC_RETRY_SLEEP_SECONDS = 0.8
+    DEFAULT_CONNECT_RETRY_COUNT = 2
+    DEFAULT_CONNECT_RETRY_SLEEP_SECONDS = 1.5
 
-    def __init__(self, serial: str) -> None:
+    def __init__(self, serial: str, *, settings: DeviceSettings | None = None) -> None:
         self.serial = serial
-        self.device = self._connect_with_retry(serial)
+        self.settings = settings
+        self.find_poll_interval_seconds = self.DEFAULT_FIND_POLL_INTERVAL_SECONDS
+        self.response_poll_interval_seconds = self.DEFAULT_RESPONSE_POLL_INTERVAL_SECONDS
+        self.rpc_retry_count = settings.u2_rpc_retry_count if settings is not None else self.DEFAULT_RPC_RETRY_COUNT
+        self.rpc_retry_sleep_seconds = (
+            settings.u2_rpc_retry_sleep_seconds
+            if settings is not None
+            else self.DEFAULT_RPC_RETRY_SLEEP_SECONDS
+        )
+        self.connect_retry_count = (
+            settings.u2_connect_retry_count
+            if settings is not None
+            else self.DEFAULT_CONNECT_RETRY_COUNT
+        )
+        self.connect_retry_sleep_seconds = (
+            settings.u2_connect_retry_sleep_seconds
+            if settings is not None
+            else self.DEFAULT_CONNECT_RETRY_SLEEP_SECONDS
+        )
+        self.connect_attempt_timeout_seconds = (
+            settings.u2_connect_attempt_timeout_seconds
+            if settings is not None
+            else 35.0
+        )
+        self.device = self._connect_with_retry()
 
     @staticmethod
     def _connect(serial: str) -> Any:
@@ -37,53 +64,94 @@ class U2Driver:
             raise U2DriverError("uiautomator2 is not installed. Install requirements.txt first.") from exc
         return u2.connect(serial)
 
-    @classmethod
-    def _connect_with_retry(cls, serial: str) -> Any:
+    def _connect_with_retry(self) -> Any:
         last_exc: Exception | None = None
-        for attempt in range(cls.CONNECT_RETRY_COUNT + 1):
+        max_attempts = max(1, self.connect_retry_count + 1)
+        for attempt in range(1, max_attempts + 1):
             try:
-                return cls._connect(serial)
+                device = self._run_with_timeout(
+                    lambda: self._connect(self.serial),
+                    timeout_seconds=self.connect_attempt_timeout_seconds,
+                    timeout_label="uiautomator2 connect",
+                )
+                self._probe_device(device)
+                return device
             except Exception as exc:
                 last_exc = exc
-                if attempt >= cls.CONNECT_RETRY_COUNT:
+                if attempt >= max_attempts:
                     break
                 logger.warning(
                     "uiautomator2 connect failed: serial=%s retry=%s/%s error=%s",
-                    serial,
-                    attempt + 1,
-                    cls.CONNECT_RETRY_COUNT,
+                    self.serial,
+                    attempt,
+                    max_attempts - 1,
                     exc,
                 )
-                time.sleep(cls.CONNECT_RETRY_SLEEP_SECONDS)
-        raise U2DriverError(f"uiautomator2 connect failed after recovery: {serial}") from last_exc
+                time.sleep(self.connect_retry_sleep_seconds)
+        raise U2DriverError(f"uiautomator2 connect failed after recovery: {self.serial}") from last_exc
+
+    @staticmethod
+    def _probe_device(device: Any) -> None:
+        info = device.info
+        if not isinstance(info, dict) or not info:
+            raise U2DriverError("uiautomator2 connected, but device info probe returned no data.")
 
     def _reset_connection(self) -> None:
         try:
             self.device.reset_uiautomator()
         except Exception as exc:
             logger.warning("Failed to reset uiautomator2 for %s before reconnect: %s", self.serial, exc)
-        self.device = self._connect_with_retry(self.serial)
+        self.device = self._connect_with_retry()
 
     def _rpc(self, action: str, func: Callable[[], Any]) -> Any:
         last_exc: Exception | None = None
-        for attempt in range(self.RPC_RETRY_COUNT + 1):
+        max_attempts = max(1, self.rpc_retry_count + 1)
+        for attempt in range(1, max_attempts + 1):
             try:
                 return func()
             except Exception as exc:
                 last_exc = exc
-                if attempt >= self.RPC_RETRY_COUNT:
+                if attempt >= max_attempts:
                     break
                 logger.warning(
                     "uiautomator2 RPC failed: action=%s serial=%s retry=%s/%s error=%s",
                     action,
                     self.serial,
-                    attempt + 1,
-                    self.RPC_RETRY_COUNT,
+                    attempt,
+                    max_attempts - 1,
                     exc,
                 )
                 self._reset_connection()
-                time.sleep(self.RPC_RETRY_SLEEP_SECONDS)
+                time.sleep(self.rpc_retry_sleep_seconds)
         raise U2DriverError(f"uiautomator2 RPC failed after recovery: {action}") from last_exc
+
+    def health_check(self) -> None:
+        self._rpc("health_check", lambda: self.device.info)
+
+    @staticmethod
+    def _run_with_timeout(
+        func: Callable[[], Any],
+        *,
+        timeout_seconds: float,
+        timeout_label: str,
+    ) -> Any:
+        result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def run() -> None:
+            try:
+                result_queue.put_nowait((True, func()))
+            except Exception as exc:
+                result_queue.put_nowait((False, exc))
+
+        thread = threading.Thread(target=run, name="u2-connect-timeout", daemon=True)
+        thread.start()
+        try:
+            succeeded, value = result_queue.get(timeout=timeout_seconds)
+        except queue.Empty as exc:
+            raise U2DriverError(f"{timeout_label} timed out after {timeout_seconds:.1f}s") from exc
+        if succeeded:
+            return value
+        raise value
 
     def wake(self) -> None:
         self._rpc("screen_on", lambda: self.device.screen_on())
@@ -108,7 +176,7 @@ class U2Driver:
             found = self.find_first(selectors)
             if found is not None:
                 return found
-            time.sleep(self.FIND_POLL_INTERVAL_SECONDS)
+            time.sleep(self.find_poll_interval_seconds)
         joined = "; ".join(selector.describe() for selector in selectors)
         raise U2DriverError(f"Timed out waiting for selectors: {joined}")
 
@@ -182,7 +250,7 @@ class U2Driver:
                 current = self._normalize_for_match(node.attrib.get("text", ""))
                 if current and (expected in current or current in expected):
                     return True
-            time.sleep(self.FIND_POLL_INTERVAL_SECONDS)
+            time.sleep(self.find_poll_interval_seconds)
         return False
 
     def wait_for_input_text(self, text: str, *, timeout_seconds: int) -> bool:
@@ -198,7 +266,7 @@ class U2Driver:
                 current = self._normalize_for_match(node.attrib.get("text", ""))
                 if current and (expected in current or current in expected):
                     return True
-            time.sleep(self.FIND_POLL_INTERVAL_SECONDS)
+            time.sleep(self.find_poll_interval_seconds)
         return False
 
     def swipe_up(self, start_ratio: float = 0.82, end_ratio: float = 0.28, x_ratio: float = 0.5) -> None:
@@ -367,7 +435,7 @@ class U2Driver:
                 if time.monotonic() - last_change_ts >= settle_seconds:
                     return last_candidate
 
-            time.sleep(self.RESPONSE_POLL_INTERVAL_SECONDS)
+            time.sleep(self.response_poll_interval_seconds)
 
         raise U2DriverError("Timed out waiting for Doubao response.")
 

@@ -200,6 +200,33 @@ Invoke-RestMethod `
   -Headers @{ "x-api-key" = "your-crawler-api-key" }
 ```
 
+## 连接稳定性配置
+
+多手机并发时，优先关注下面这组参数：
+
+```env
+ADB_CONNECT_RETRY_COUNT=3
+ADB_CONNECT_RETRY_INTERVAL_SECONDS=2
+ADB_CONNECT_CONFIRM_RETRIES=3
+ADB_CONNECT_CONFIRM_INTERVAL_SECONDS=1
+WORKER_STARTUP_TIMEOUT_SECONDS=15
+DRIVER_INIT_RETRY_COUNT=2
+DRIVER_INIT_RETRY_SLEEP_SECONDS=1.5
+U2_CONNECT_RETRY_COUNT=3
+U2_CONNECT_RETRY_SLEEP_SECONDS=2
+U2_CONNECT_ATTEMPT_TIMEOUT_SECONDS=35
+U2_RPC_RETRY_COUNT=3
+U2_RPC_RETRY_SLEEP_SECONDS=1
+```
+
+当前启动链路已经改成：
+
+- worker 进程先快速启动，不再在启动阶段阻塞等待 driver 建立
+- 真正的 ADB / uiautomator2 初始化延后到首次任务执行时
+- `adb connect` 会做重试和二次确认，不再只看一次命令输出
+- `uiautomator2` 建连后会立刻做健康检查，失败时自动重连
+- 多设备预启动改成并发，不再一台卡 45 秒拖住后面的设备
+
 批任务结果：
 
 ```powershell

@@ -19,15 +19,13 @@ def device_worker_main(
     device: DeviceTarget,
 ) -> None:
     configure_logging()
-    session = DeviceSession(
-        settings=settings,
-        instance_id=device.instance_id,
-        device_id=device.device_id,
-        adb_endpoint=device.adb_endpoint,
-    )
-
     try:
-        session.ensure_driver()
+        session = DeviceSession(
+            settings=settings,
+            instance_id=device.instance_id,
+            device_id=device.device_id,
+            adb_endpoint=device.adb_endpoint,
+        )
         result_queue.put(
             {
                 "type": "worker_ready",
@@ -64,6 +62,7 @@ def device_worker_main(
         save_result = bool(message.get("save_result", False))
 
         try:
+            session.ensure_driver()
             workflow = build_workflow(settings, platform)
             result = workflow.run_once_with_session(
                 session=session,

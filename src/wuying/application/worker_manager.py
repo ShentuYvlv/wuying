@@ -4,6 +4,7 @@ import multiprocessing as mp
 import queue
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -61,12 +62,18 @@ class WorkerManager:
         self._manager_lock = threading.Lock()
 
     def start_all(self, devices: list[DeviceTarget]) -> None:
-        for device in devices:
-            try:
-                self.ensure_worker(device)
-            except Exception as exc:
-                logger.warning("Failed to start device worker: device_id=%s error=%s", device.device_id, exc)
-                continue
+        if not devices:
+            return
+        max_workers = max(1, len(devices))
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="worker-startup") as executor:
+            futures = {executor.submit(self.ensure_worker, device): device for device in devices}
+            for future in as_completed(futures):
+                device = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    logger.warning("Failed to start device worker: device_id=%s error=%s", device.device_id, exc)
+                    continue
 
     def stop_all(self) -> None:
         with self._manager_lock:
@@ -77,11 +84,11 @@ class WorkerManager:
     def ensure_worker(self, device: DeviceTarget) -> WorkerHandle:
         with self._manager_lock:
             handle = self._handles.get(device.device_id)
-            if handle is not None and handle.process.is_alive():
-                return handle
-            handle = self._start_worker_locked(device)
-            self._handles[device.device_id] = handle
-            return handle
+            if handle is None or not handle.process.is_alive():
+                handle = self._spawn_worker_locked(device)
+                self._handles[device.device_id] = handle
+        self._ensure_worker_started(handle)
+        return handle
 
     def restart_worker(self, device_id: str) -> WorkerHandle:
         with self._manager_lock:
@@ -123,6 +130,9 @@ class WorkerManager:
         with handle._lock:
             if not handle.process.is_alive():
                 handle = self.restart_worker(device.device_id)
+                self._ensure_worker_started(handle)
+
+            self._ensure_worker_started_locked(handle)
 
             request_id = uuid4().hex
             handle.current_request_id = request_id
@@ -201,7 +211,7 @@ class WorkerManager:
             f"platform={handle.current_platform}, device_id={handle.device.device_id}, instance_id={handle.device.instance_id}"
         )
 
-    def _start_worker_locked(self, device: DeviceTarget) -> WorkerHandle:
+    def _spawn_worker_locked(self, device: DeviceTarget) -> WorkerHandle:
         command_queue: mp.Queue = self._context.Queue()
         result_queue: mp.Queue = self._context.Queue()
         process = self._context.Process(
@@ -217,27 +227,47 @@ class WorkerManager:
             command_queue=command_queue,
             result_queue=result_queue,
         )
-        try:
-            message = result_queue.get(timeout=45)
-        except queue.Empty as exc:
-            process.terminate()
-            process.join(timeout=5)
-            raise WorkerManagerError(f"Device worker startup timed out: {device.device_id}") from exc
+        return handle
 
-        if not isinstance(message, dict):
-            process.terminate()
-            process.join(timeout=5)
-            raise WorkerManagerError(f"Device worker startup returned invalid message: {device.device_id}")
+    def _ensure_worker_started(self, handle: WorkerHandle) -> None:
+        with handle._lock:
+            self._ensure_worker_started_locked(handle)
 
-        if message.get("type") == "worker_ready":
-            handle.state = "idle"
-            handle.started_at = str(message.get("started_at") or _utc_now())
-            return handle
+    def _ensure_worker_started_locked(self, handle: WorkerHandle) -> None:
+        if handle.state == "idle":
+            return
+        if handle.state == "failed":
+            raise WorkerManagerError(handle.last_error or f"Device worker failed: {handle.device.device_id}")
+        if not handle.process.is_alive():
+            raise WorkerManagerError(f"Device worker exited unexpectedly: {handle.device.device_id}")
 
-        handle.state = "failed"
-        handle.last_error = str(message.get("error") or "worker startup failed")
-        process.join(timeout=5)
-        raise WorkerManagerError(handle.last_error)
+        timeout_seconds = self.settings.device.worker_startup_timeout_seconds
+        deadline = datetime.now(tz=UTC).timestamp() + timeout_seconds
+        while datetime.now(tz=UTC).timestamp() < deadline:
+            remaining = max(0.1, deadline - datetime.now(tz=UTC).timestamp())
+            try:
+                message = handle.result_queue.get(timeout=min(0.5, remaining))
+            except queue.Empty:
+                if not handle.process.is_alive():
+                    raise WorkerManagerError(f"Device worker exited unexpectedly: {handle.device.device_id}")
+                continue
+
+            if not isinstance(message, dict):
+                continue
+
+            message_type = str(message.get("type") or "")
+            if message_type == "worker_ready":
+                handle.state = "idle"
+                handle.started_at = str(message.get("started_at") or _utc_now())
+                return
+            if message_type == "worker_failed":
+                handle.state = "failed"
+                handle.last_error = str(message.get("error") or "worker startup failed")
+                self._discard_failed_handle(handle)
+                raise WorkerManagerError(handle.last_error)
+
+        self._discard_failed_handle(handle)
+        raise WorkerManagerError(f"Device worker startup timed out: {handle.device.device_id}")
 
     def _timeout_restart(self, handle: WorkerHandle, *, platform: str, prompt: str) -> None:
         handle.state = "timeout"
@@ -250,6 +280,23 @@ class WorkerManager:
         handle.state = "failed"
         handle.last_error = error
         self.restart_worker(handle.device.device_id)
+
+    def _discard_failed_handle(self, handle: WorkerHandle) -> None:
+        with self._manager_lock:
+            current = self._handles.get(handle.device.device_id)
+            if current is handle:
+                self._handles.pop(handle.device.device_id, None)
+        try:
+            handle.command_queue.put({"type": "shutdown"})
+        except Exception:
+            pass
+        handle.process.join(timeout=2)
+        if handle.process.is_alive():
+            handle.process.terminate()
+            handle.process.join(timeout=5)
+        if handle.process.is_alive():
+            handle.process.kill()
+            handle.process.join(timeout=5)
 
 
 def _utc_now() -> str:
