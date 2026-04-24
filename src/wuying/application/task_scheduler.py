@@ -574,13 +574,41 @@ def _apply_prompt_metrics(
     *,
     metrics_runtime: dict[str, object] | None,
     output_path: Path,
-) -> list[dict[str, object]]:
+) -> dict[str, object]:
     metrics = _calculate_prompt_metrics(
         prompt_records,
         metrics_runtime=metrics_runtime,
         output_path=output_path,
     )
-    return [{**record, **metrics} for record in prompt_records]
+    clean_records = [_without_prompt_metrics(record) for record in prompt_records]
+    platform = str(prompt_records[0].get("platform") or "") if prompt_records else ""
+    prompt = str(prompt_records[0].get("prompt") or prompt_records[0].get("query") or "") if prompt_records else ""
+    prompt_index = _coerce_int(prompt_records[0].get("prompt_index"), default=0) if prompt_records else 0
+    repeat_indexes = sorted(
+        {
+            _coerce_int(record.get("repeat_index"), default=0)
+            for record in prompt_records
+            if record.get("repeat_index") is not None
+        }
+    )
+    return {
+        "platform_id": f"wuying-{platform}" if platform else "",
+        "platform": platform,
+        "query": prompt,
+        "prompt": prompt,
+        "prompt_index": prompt_index,
+        "repeat_indexes": repeat_indexes,
+        "record_count": len(clean_records),
+        "records": clean_records,
+        **metrics,
+    }
+
+
+def _without_prompt_metrics(record: dict[str, object]) -> dict[str, object]:
+    clean_record = dict(record)
+    for key in _default_prompt_metrics():
+        clean_record.pop(key, None)
+    return clean_record
 
 
 def _calculate_prompt_metrics(

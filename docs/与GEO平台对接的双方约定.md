@@ -616,3 +616,181 @@ finished_at - started_at
 - `finished_at`
 
 设备级 record 也应提供各自的 `started_at / finished_at`，便于 GEO 展示每个设备的耗时。
+
+## 追加修改：指标计算关键词由 GEO 按任务传入
+
+更新时间：2026-04-24
+
+### 背景
+
+Wuying 在生成 `prompts/*.json` 时会计算并写入以下指标字段：
+
+```json
+{
+  "提及率": 100,
+  "前三率": 100,
+  "置顶率": 0,
+  "负面提及率": 0,
+  "attitude": 92
+}
+```
+
+这些指标不能只靠 prompt 自动推断，必须明确知道本次任务要检测的品牌词或关键词。
+
+因此 GEO 调用 Wuying 时，需要在 batch 请求的 `env` 里传指标关键词。
+
+### GEO 请求约定
+
+GEO 调用：
+
+```text
+POST /api/v2/batches
+```
+
+请求体示例：
+
+```json
+{
+  "platforms": ["doubao", "kimi"],
+  "prompts": ["进口乳铁蛋白粉推荐"],
+  "device_ids": ["北京", "上海", "杭州", "深圳", "杭州2"],
+  "repeat": 1,
+  "env": {
+    "task_id": "geo-task-id",
+    "run_id": "geo-task-id:2026-04-24:1:1",
+    "callback_url": "http://geo-watcher-backend:3005/api/integrations/crawler/uploads",
+    "callback_api_key": "xxx",
+    "progress_url": "http://geo-watcher-backend:3005/api/integrations/crawler/progress",
+    "progress_api_key": "xxx",
+    "metric_keyword": "诺崔特",
+    "metric_detect_type": "rank"
+  }
+}
+```
+
+### 字段含义
+
+`metric_keyword`：
+
+本次任务要检测的品牌词、产品词或核心关键词。Wuying 会用它判断每条回答是否提及目标，以及目标在回答中的推荐排序。
+
+`metric_detect_type`：
+
+检测模式。当前建议固定传：
+
+```text
+rank
+```
+
+`rank` 会计算：
+
+- `提及率`
+- `前三率`
+- `置顶率`
+
+`负面提及率` 和 `attitude` 当前可以继续由 Wuying 写入占位值或后续补充算法。
+
+### Wuying 读取优先级
+
+Wuying 当前读取指标关键词的优先级如下：
+
+1. 请求 `env.metric_keyword`
+2. 请求 `env.metricKeyword`
+3. 请求 `env.keyword`
+4. 请求 `env.target_keyword`
+5. 请求 `env.targetKeyword`
+6. 请求 `env.brand_keyword`
+7. 请求 `env.brandKeyword`
+8. 请求 `env.product_name`
+9. 请求 `env.productName`
+10. 服务端环境变量 `PIPELINE_METRIC_KEYWORD`
+11. 服务端环境变量 `METRIC_KEYWORD`
+
+最终建议 GEO 固定使用：
+
+```json
+{
+  "env": {
+    "metric_keyword": "诺崔特",
+    "metric_detect_type": "rank"
+  }
+}
+```
+
+### LLM 配置
+
+指标计算依赖 Wuying 服务端自己的 LLM 配置。GEO 默认不需要传 API Key。
+
+Wuying 服务端 `.env` 需要配置：
+
+```env
+PIPELINE_LLM_API_KEY=xxx
+PIPELINE_LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+PIPELINE_LLM_MODEL=doubao-seed-1-6-lite-251015
+```
+
+如果某次任务确实要覆盖 Wuying 默认 LLM 配置，也可以在 `env` 中传：
+
+```json
+{
+  "metric_api_key": "xxx",
+  "metric_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+  "metric_model": "doubao-seed-1-6-lite-251015"
+}
+```
+
+但默认不建议 GEO 传这些字段，避免把 Wuying 的模型配置耦合到 GEO。
+
+### 未传关键词时的行为
+
+如果 GEO 没传 `metric_keyword`，且 Wuying 服务端也没有配置 `PIPELINE_METRIC_KEYWORD`：
+
+1. Wuying 仍正常执行爬虫。
+2. Wuying 不会调用 LLM 指标计算。
+3. `prompts/*.json` 中指标字段会写为 `null`。
+4. 任务不会因为缺少指标关键词而失败。
+
+### Callback 文件中的结果
+
+最终 callback 上传的每个 `prompts/*.json` 文件内，只在文件顶层写入一组综合指标值。
+
+原因是一个 `prompts/*.json` 文件对应：
+
+```text
+一个平台 + 一个 prompt + 多台设备结果
+```
+
+所以指标计算口径也是这个文件整体的一组聚合指标，而不是每台设备单独一组指标。
+
+文件结构示例：
+
+```json
+{
+  "platform_id": "wuying-doubao",
+  "platform": "doubao",
+  "query": "进口乳铁蛋白粉推荐",
+  "prompt": "进口乳铁蛋白粉推荐",
+  "prompt_index": 1,
+  "repeat_indexes": [1],
+  "record_count": 5,
+  "records": [
+    {
+      "platform_id": "wuying-doubao",
+      "platform": "doubao",
+      "device_id": "杭州",
+      "query": "进口乳铁蛋白粉推荐",
+      "response": "单台设备回答正文",
+      "references": {},
+      "raw_output_path": "data/tasks/xxx/raw/doubao_杭州_p001_r001.json",
+      "status": "succeeded"
+    }
+  ],
+  "提及率": 100,
+  "前三率": 100,
+  "置顶率": 0,
+  "负面提及率": 0,
+  "attitude": 92
+}
+```
+
+`records[]` 内不再写入 `提及率 / 前三率 / 置顶率 / 负面提及率 / attitude`。

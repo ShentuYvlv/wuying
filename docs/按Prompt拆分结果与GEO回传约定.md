@@ -157,54 +157,75 @@ files=2026-04-21-15-deepseek-p002-洗地机推荐.json
 
 ## Callback 文件内容
 
-每个文件内容是 record 数组。
+每个文件内容是一个对象。
+
+对象顶层表示：
+
+- 当前平台
+- 当前 prompt
+- 当前平台 + prompt 下的所有设备 records
+- 当前平台 + prompt 汇总后的唯一一组指标
 
 `raw/*.json` 是原始设备结果，不包含 `提及率 / 前三率 / 置顶率 / 负面提及率 / attitude`。
 
-`prompts/*.json` 是最终回传结果，写入前统一补充上述指标字段。当前指标计算函数是占位逻辑，后续在 Wuying 侧补真实计算。
+`prompts/*.json` 是最终回传结果，写入前在文件顶层统一补充上述指标字段。
 
-单条 callback record 结构：
+Callback 文件结构：
 
 ```json
 {
   "platform_id": "wuying-doubao",
   "platform": "doubao",
-  "device_id": "杭州",
-  "instance_id": "acp-xxx",
-  "adb_endpoint": "1.2.3.4:100",
   "query": "牛奶推荐",
   "prompt": "牛奶推荐",
   "prompt_index": 1,
-  "repeat_index": 1,
-  "response": "AI 回答正文",
+  "repeat_indexes": [1],
+  "record_count": 3,
+  "records": [
+    {
+      "platform_id": "wuying-doubao",
+      "platform": "doubao",
+      "device_id": "杭州",
+      "instance_id": "acp-xxx",
+      "adb_endpoint": "1.2.3.4:100",
+      "query": "牛奶推荐",
+      "prompt": "牛奶推荐",
+      "prompt_index": 1,
+      "repeat_index": 1,
+      "response": "AI 回答正文",
+      "references": {
+        "summary": null,
+        "keywords": [],
+        "items": []
+      },
+      "raw_output_path": "data/tasks/wuying-xxx/raw/doubao_杭州_p001_r001.json",
+      "status": "succeeded",
+      "error": null,
+      "started_at": "2026-04-21T06:15:30+00:00",
+      "finished_at": "2026-04-21T06:16:20+00:00",
+      "platform_extra": {}
+    }
+  ],
   "提及率": 100,
   "前三率": 100,
   "置顶率": 0,
   "负面提及率": 0,
-  "attitude": 92,
-  "references": {
-    "summary": null,
-    "keywords": [],
-    "items": []
-  },
-  "raw_output_path": "data/tasks/wuying-xxx/raw/doubao_杭州_p001_r001.json",
-  "status": "succeeded",
-  "error": null,
-  "started_at": "2026-04-21T06:15:30+00:00",
-  "finished_at": "2026-04-21T06:16:20+00:00",
-  "platform_extra": {}
+  "attitude": 92
 }
 ```
+
+`records[]` 内不写入 `提及率 / 前三率 / 置顶率 / 负面提及率 / attitude`。
 
 ## GEO 需要修改的点
 
 1. callback 接口支持同名字段 `files` 下的多个 JSON 文件。
 2. 不再读取或依赖 `records.json`。
 3. 不再依赖 `records_path`，该字段新任务为 `null`。
-4. 每个 JSON 文件单独解析，文件内容是 record 数组。
-5. 每条 record 仍然使用自己的 `platform_id`、`platform`、`device_id`、`query` 入库。
-6. 审核队列建议按文件维度展示，一个文件对应一个平台和一个 prompt。
-7. 如果某个平台的某个 prompt 全部失败，Wuying 仍会上传该文件，文件内 records 的 `status` 为 `failed` 或 `timeout`。
+4. 每个 JSON 文件单独解析，文件内容是对象，设备结果在 `records[]`。
+5. 指标字段只读取文件顶层的 `提及率`、`前三率`、`置顶率`、`负面提及率`、`attitude`。
+6. 每条 record 仍然使用自己的 `platform_id`、`platform`、`device_id`、`query` 入库。
+7. 审核队列建议按文件维度展示，一个文件对应一个平台和一个 prompt。
+8. 如果某个平台的某个 prompt 全部失败，Wuying 仍会上传该文件，文件内 records 的 `status` 为 `failed` 或 `timeout`。
 
 ## 兼容说明
 

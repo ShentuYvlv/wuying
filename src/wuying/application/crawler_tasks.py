@@ -675,6 +675,10 @@ def _build_callback_files(
                 payload = json.loads(payload_bytes.decode("utf-8"))
                 if isinstance(payload, list):
                     record_count += len(payload)
+                elif isinstance(payload, dict):
+                    records_payload = payload.get("records")
+                    if isinstance(records_payload, list):
+                        record_count += len(records_payload)
             except Exception:
                 pass
             files.append(("files", (path.name, payload_bytes, "application/json")))
@@ -698,7 +702,16 @@ def _build_callback_files(
         key=lambda item: (item[0][1], item[0][0], item[0][2]),
     ):
         filename = f"callback-{_safe_filename_part(platform)[:40]}-p{prompt_index:03d}-{_safe_filename_part(prompt)[:80]}.json"
-        payload_bytes = json.dumps(records, ensure_ascii=False, indent=2).encode("utf-8")
+        payload = {
+            "platform_id": f"wuying-{platform}",
+            "platform": platform,
+            "query": prompt,
+            "prompt": prompt,
+            "prompt_index": prompt_index,
+            "record_count": len(records),
+            "records": records,
+        }
+        payload_bytes = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         files.append(("files", (filename, payload_bytes, "application/json")))
         record_count += len(records)
 

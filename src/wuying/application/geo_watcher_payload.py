@@ -3,16 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 
-MOCK_METRICS: dict[str, int] = {
-    "提及率": 100,
-    "前三率": 100,
-    "置顶率": 0,
-    "负面提及率": 0,
-}
-
-MOCK_ATTITUDE = 92
-
-
 def build_geo_watcher_records(
     *,
     raw_result: dict[str, Any],
@@ -23,8 +13,6 @@ def build_geo_watcher_records(
         {
             "query": raw_result.get("prompt", ""),
             "response": raw_result.get("response", ""),
-            **MOCK_METRICS,
-            "attitude": MOCK_ATTITUDE,
             "platform_id": platform_id,
             "platform": raw_result.get("platform", ""),
             "device_id": raw_result.get("device_id", ""),
@@ -34,4 +22,4 @@ def build_geo_watcher_records(
     ]
 
 
-__all__ = ["MOCK_ATTITUDE", "MOCK_METRICS", "build_geo_watcher_records"]
+__all__ = ["build_geo_watcher_records"]
