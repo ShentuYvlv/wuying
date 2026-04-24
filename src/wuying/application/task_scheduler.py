@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from wuying.application.batch_models import BatchTaskRequest, DeviceRunRecord
 from wuying.application.device_pool import DeviceTarget
-from wuying.application.geo_watcher_payload import MOCK_ATTITUDE, MOCK_METRICS
 from wuying.application.worker_manager import WorkerManager
 from wuying.config import AppSettings
 
@@ -43,6 +43,7 @@ def run_batch_job_with_workers(
     raw_dir.mkdir(parents=True, exist_ok=True)
     prompt_dir.mkdir(parents=True, exist_ok=True)
     worker_manager.start_all(devices)
+    metrics_runtime = _create_prompt_metrics_runtime(request.env)
     if progress_callback is not None:
         progress_callback(
             {
@@ -134,7 +135,13 @@ def run_batch_job_with_workers(
                         failed_records += 1
                         last_error = device_result.error or last_error
 
-                prompt_files = _write_prompt_result_files(prompt_dir, records, file_stamp=file_stamp)
+                prompt_files = _write_prompt_result_files(
+                    prompt_dir,
+                    records,
+                    file_stamp=file_stamp,
+                    metrics_runtime=metrics_runtime,
+                    changed_keys={(platform, prompt_index, prompt)},
+                )
                 prompt_finished_at = _utc_now()
                 current_prompt_file = _find_prompt_file(
                     prompt_files=prompt_files,
@@ -200,7 +207,13 @@ def run_batch_job_with_workers(
         failed_batches=failed_batches,
         stopped_reason=stopped_reason,
     )
-    prompt_files = _write_prompt_result_files(prompt_dir, records, file_stamp=file_stamp)
+    prompt_files = _write_prompt_result_files(
+        prompt_dir,
+        records,
+        file_stamp=file_stamp,
+        metrics_runtime=metrics_runtime,
+        changed_keys=set(),
+    )
 
     return {
         "task_id": task_id,
@@ -479,6 +492,8 @@ def _write_prompt_result_files(
     records: list[dict[str, object]],
     *,
     file_stamp: str,
+    metrics_runtime: dict[str, object] | None,
+    changed_keys: set[tuple[str, int, str]] | None = None,
 ) -> list[dict[str, object]]:
     prompt_dir.mkdir(parents=True, exist_ok=True)
     grouped: dict[tuple[str, int, str], list[dict[str, object]]] = {}
@@ -496,14 +511,25 @@ def _write_prompt_result_files(
         grouped.items(),
         key=lambda item: (item[0][1], item[0][0], item[0][2]),
     ):
+        group_key = (platform, prompt_index, prompt)
         output_path = prompt_dir / _prompt_result_filename(
             file_stamp=file_stamp,
             platform=platform,
             prompt_index=prompt_index,
             prompt=prompt,
         )
-        prompt_payload = _apply_prompt_metrics(prompt_records)
-        _write_json_atomic(output_path, prompt_payload)
+        should_rewrite = (
+            changed_keys is None
+            or group_key in changed_keys
+            or not output_path.exists()
+        )
+        if should_rewrite:
+            prompt_payload = _apply_prompt_metrics(
+                prompt_records,
+                metrics_runtime=metrics_runtime,
+                output_path=output_path,
+            )
+            _write_json_atomic(output_path, prompt_payload)
         current_paths.add(output_path)
         prompt_files.append(
             {
@@ -543,15 +569,135 @@ def _find_prompt_file(
             return str(path) if path else None
     return None
 
-
-def _apply_prompt_metrics(prompt_records: list[dict[str, object]]) -> list[dict[str, object]]:
-    metrics = _calculate_prompt_metrics(prompt_records)
+def _apply_prompt_metrics(
+    prompt_records: list[dict[str, object]],
+    *,
+    metrics_runtime: dict[str, object] | None,
+    output_path: Path,
+) -> list[dict[str, object]]:
+    metrics = _calculate_prompt_metrics(
+        prompt_records,
+        metrics_runtime=metrics_runtime,
+        output_path=output_path,
+    )
     return [{**record, **metrics} for record in prompt_records]
 
 
-def _calculate_prompt_metrics(prompt_records: list[dict[str, object]]) -> dict[str, object]:
-    # TODO: Replace this placeholder with the real GEO metric calculation.
-    return {**MOCK_METRICS, "attitude": MOCK_ATTITUDE}
+def _calculate_prompt_metrics(
+    prompt_records: list[dict[str, object]],
+    *,
+    metrics_runtime: dict[str, object] | None,
+    output_path: Path,
+) -> dict[str, object]:
+    default_metrics = _default_prompt_metrics()
+    if not prompt_records:
+        return default_metrics
+    if not metrics_runtime:
+        return default_metrics
+
+    analyzer = metrics_runtime.get("analyzer")
+    if analyzer is None:
+        return default_metrics
+
+    try:
+        summary = analyzer.analyze_records(prompt_records, input_file=str(output_path))
+        metrics = summary.get("metrics")
+        if not isinstance(metrics, dict):
+            return default_metrics
+        return {
+            "提及率": metrics.get("提及率"),
+            "前三率": metrics.get("前三率"),
+            "置顶率": metrics.get("置顶率"),
+            "负面提及率": metrics.get("负面提及率"),
+            "attitude": metrics.get("attitude"),
+        }
+    except Exception as exc:
+        logger.warning("Prompt metrics calculation failed: path=%s error=%s", output_path, exc)
+        return default_metrics
+
+
+def _default_prompt_metrics() -> dict[str, object]:
+    return {
+        "提及率": None,
+        "前三率": None,
+        "置顶率": None,
+        "负面提及率": None,
+        "attitude": None,
+    }
+
+
+def _create_prompt_metrics_runtime(task_env: dict[str, Any]) -> dict[str, object] | None:
+    keyword = _first_non_empty(
+        task_env.get("metric_keyword"),
+        task_env.get("metricKeyword"),
+        task_env.get("keyword"),
+        task_env.get("target_keyword"),
+        task_env.get("targetKeyword"),
+        task_env.get("brand_keyword"),
+        task_env.get("brandKeyword"),
+        task_env.get("product_name"),
+        task_env.get("productName"),
+        os.getenv("PIPELINE_METRIC_KEYWORD"),
+        os.getenv("METRIC_KEYWORD"),
+    )
+    if not keyword:
+        logger.info("Prompt metrics analyzer is disabled because metric keyword is not configured.")
+        return None
+
+    detect_type = (
+        _first_non_empty(
+            task_env.get("metric_detect_type"),
+            task_env.get("metricDetectType"),
+            task_env.get("detect_type"),
+            task_env.get("detectType"),
+            os.getenv("PIPELINE_METRIC_DETECT_TYPE"),
+        )
+        or "rank"
+    ).strip().lower()
+
+    try:
+        from pipeline import PromptMetricsAnalyzer
+
+        analyzer = PromptMetricsAnalyzer(
+            keyword=keyword,
+            detect_type=detect_type,
+            api_key=_first_non_empty(
+                task_env.get("metric_api_key"),
+                task_env.get("metricApiKey"),
+                os.getenv("PIPELINE_LLM_API_KEY"),
+            ),
+            base_url=_first_non_empty(
+                task_env.get("metric_base_url"),
+                task_env.get("metricBaseUrl"),
+                os.getenv("PIPELINE_LLM_BASE_URL"),
+            )
+            or "https://ark.cn-beijing.volces.com/api/v3",
+            model=_first_non_empty(
+                task_env.get("metric_model"),
+                task_env.get("metricModel"),
+                os.getenv("PIPELINE_LLM_MODEL"),
+            )
+            or "doubao-seed-1-6-lite-251015",
+        )
+    except Exception as exc:
+        logger.warning("Prompt metrics analyzer init failed: keyword=%s detect_type=%s error=%s", keyword, detect_type, exc)
+        return None
+
+    logger.info("Prompt metrics analyzer enabled: keyword=%s detect_type=%s", keyword, detect_type)
+    return {
+        "keyword": keyword,
+        "detect_type": detect_type,
+        "analyzer": analyzer,
+    }
+
+
+def _first_non_empty(*values: object) -> str | None:
+    for value in values:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+    return None
 
 
 def _prompt_result_filename(*, file_stamp: str, platform: str, prompt_index: int, prompt: str) -> str:

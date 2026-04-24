@@ -80,6 +80,7 @@ $env:ADB_VENDOR_KEYS="E:\all code\C一念\wuying\platform-tools\adbkey"
 - 最终业务结果按 `平台 + prompt` 拆分到 `data/tasks/<task_id>/prompts/*.json`
 - 单条原始结果和失败记录保存到 `data/tasks/<task_id>/raw/*.json`
 - `data/runs` 已废弃，不再作为任何模式的输出目录
+- 如果配置了 `PIPELINE_LLM_API_KEY + PIPELINE_METRIC_KEYWORD`，每个 `prompts/*.json` 在生成时会自动计算并写入指标字段
 
 ## API 运行
 
@@ -97,6 +98,9 @@ CRAWLER_PROGRESS_API_KEY=your-callback-api-key
 CRAWLER_RECORD_TIMEOUT_SECONDS=300
 CRAWLER_BATCH_TIMEOUT_SECONDS=3600
 CRAWLER_BATCH_MAX_WORKERS=5
+PIPELINE_LLM_API_KEY=your-llm-api-key
+PIPELINE_METRIC_KEYWORD=你的品牌名
+PIPELINE_METRIC_DETECT_TYPE=rank
 WUYING_MANUAL_ADB_ENDPOINT=106.14.114.146:100
 WUYING_INSTANCE_IDS=acp-xxxxxxxxxxxxxxxx
 WUYING_REGION_ID=cn-shanghai
@@ -286,6 +290,14 @@ CRAWLER_PLATFORM_ENDPOINTS={"wuying-doubao":"http://wuying-crawler:8000/api/v1/t
 - GEO-watcher 请求本项目时使用请求头 `x-api-key`
 - 本项目校验 `.env` 里的 `SCRAPER_API_KEY`
 - 当前 `SCRAPER_API_KEY` 必须等于 GEO-watcher 的 `CRAWLER_API_KEY`
+- 自动指标计算默认读取：
+  - `PIPELINE_LLM_API_KEY`
+  - `PIPELINE_METRIC_KEYWORD`
+  - `PIPELINE_METRIC_DETECT_TYPE`
+- 也可以在单次任务请求的 `env` 里传：
+  - `metric_keyword`
+  - `metric_detect_type`
+  - `metric_api_key`
 
 回调地址：
 
