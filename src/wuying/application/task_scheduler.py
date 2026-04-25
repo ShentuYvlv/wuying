@@ -810,18 +810,20 @@ def _default_prompt_metrics() -> dict[str, object]:
 
 
 def _create_prompt_metrics_runtime(task_env: dict[str, Any]) -> dict[str, object] | None:
-    keyword = _first_non_empty(
-        task_env.get("metric_keyword"),
-        task_env.get("metricKeyword"),
-        task_env.get("keyword"),
-        task_env.get("target_keyword"),
-        task_env.get("targetKeyword"),
-        task_env.get("brand_keyword"),
-        task_env.get("brandKeyword"),
-        task_env.get("product_name"),
-        task_env.get("productName"),
-        os.getenv("PIPELINE_METRIC_KEYWORD"),
-        os.getenv("METRIC_KEYWORD"),
+    keyword = _normalize_metric_keyword(
+        _first_non_empty(
+            task_env.get("metric_keyword"),
+            task_env.get("metricKeyword"),
+            task_env.get("keyword"),
+            task_env.get("target_keyword"),
+            task_env.get("targetKeyword"),
+            task_env.get("brand_keyword"),
+            task_env.get("brandKeyword"),
+            task_env.get("product_name"),
+            task_env.get("productName"),
+            os.getenv("PIPELINE_METRIC_KEYWORD"),
+            os.getenv("METRIC_KEYWORD"),
+        )
     )
     if not keyword:
         logger.info("Prompt metrics analyzer is disabled because metric keyword is not configured.")
@@ -839,7 +841,7 @@ def _create_prompt_metrics_runtime(task_env: dict[str, Any]) -> dict[str, object
     ).strip().lower()
 
     try:
-        from pipeline import PromptMetricsAnalyzer
+        from wuying.application.prompt_metrics import PromptMetricsAnalyzer
 
         analyzer = PromptMetricsAnalyzer(
             keyword=keyword,
@@ -881,6 +883,15 @@ def _first_non_empty(*values: object) -> str | None:
             if stripped:
                 return stripped
     return None
+
+
+def _normalize_metric_keyword(value: str | None) -> str | None:
+    if value is None:
+        return None
+    keyword = value.strip()
+    if len(keyword) >= 2 and keyword[0] == keyword[-1] and keyword[0] in {'"', "'"}:
+        keyword = keyword[1:-1].strip()
+    return keyword or None
 
 
 def _prompt_result_filename(*, file_stamp: str, platform: str, prompt_index: int, prompt: str) -> str:
