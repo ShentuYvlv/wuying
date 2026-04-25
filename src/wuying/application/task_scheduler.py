@@ -44,6 +44,8 @@ def run_batch_job_with_workers(
     prompt_dir.mkdir(parents=True, exist_ok=True)
     worker_manager.start_all(devices)
     metrics_runtime = _create_prompt_metrics_runtime(request.env)
+    failed_record_retry_count = _get_failed_record_retry_count(request.env)
+    failed_record_retry_delay_seconds = _get_failed_record_retry_delay_seconds(request.env)
     if progress_callback is not None:
         progress_callback(
             {
@@ -117,6 +119,19 @@ def run_batch_job_with_workers(
                     repeat_index=repeat_index,
                     devices=devices,
                     record_timeout_seconds=record_timeout_seconds,
+                    progress_callback=progress_callback,
+                )
+                device_results = _backfill_failed_device_results(
+                    worker_manager=worker_manager,
+                    platform=platform,
+                    prompt=prompt,
+                    prompt_index=prompt_index,
+                    repeat_index=repeat_index,
+                    devices=devices,
+                    initial_results=device_results,
+                    record_timeout_seconds=record_timeout_seconds,
+                    retry_count=failed_record_retry_count,
+                    retry_delay_seconds=failed_record_retry_delay_seconds,
                     progress_callback=progress_callback,
                 )
                 batch_status = _aggregate_device_status(device_results)
@@ -312,6 +327,146 @@ def _run_platform_prompt_on_devices(
 
     results.sort(key=lambda item: item.device_id)
     return results
+
+
+def _backfill_failed_device_results(
+    *,
+    worker_manager: WorkerManager,
+    platform: str,
+    prompt: str,
+    prompt_index: int,
+    repeat_index: int,
+    devices: list[DeviceTarget],
+    initial_results: list[DeviceRunRecord],
+    record_timeout_seconds: int,
+    retry_count: int,
+    retry_delay_seconds: float,
+    progress_callback: ProgressCallback | None = None,
+) -> list[DeviceRunRecord]:
+    if retry_count <= 0:
+        return initial_results
+
+    results_by_device = {result.device_id: result for result in initial_results}
+    devices_by_id = {device.device_id: device for device in devices}
+    previous_failures: dict[str, list[dict[str, object]]] = {}
+
+    for attempt in range(1, retry_count + 1):
+        failed_results = [
+            result
+            for result in results_by_device.values()
+            if _needs_failed_record_backfill(result)
+        ]
+        retry_devices = [
+            devices_by_id[result.device_id]
+            for result in failed_results
+            if result.device_id in devices_by_id
+        ]
+        if not retry_devices:
+            break
+
+        for failed_result in failed_results:
+            previous_failures.setdefault(failed_result.device_id, []).append(
+                {
+                    "attempt": attempt - 1,
+                    "status": failed_result.status,
+                    "error": failed_result.error,
+                    "started_at": failed_result.started_at,
+                    "finished_at": failed_result.finished_at,
+                }
+            )
+
+        logger.warning(
+            "Backfilling failed device records: platform=%s repeat=%s prompt_index=%s attempt=%s/%s devices=%s",
+            platform,
+            repeat_index,
+            prompt_index,
+            attempt,
+            retry_count,
+            ",".join(device.device_id for device in retry_devices),
+        )
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event_type": "backfill_started",
+                    "message": (
+                        f"Backfill started: platform={platform}, "
+                        f"prompt_index={prompt_index}, attempt={attempt}/{retry_count}"
+                    ),
+                    "status": "running",
+                    "current_platform": platform,
+                    "current_repeat_index": repeat_index,
+                    "current_prompt_index": prompt_index,
+                    "current_prompt": prompt,
+                    "records": [_device_progress_record(result) for result in failed_results],
+                }
+            )
+
+        if retry_delay_seconds > 0:
+            time.sleep(retry_delay_seconds)
+
+        retry_results = _run_platform_prompt_on_devices(
+            worker_manager=worker_manager,
+            platform=platform,
+            prompt=prompt,
+            prompt_index=prompt_index,
+            repeat_index=repeat_index,
+            devices=retry_devices,
+            record_timeout_seconds=record_timeout_seconds,
+            progress_callback=progress_callback,
+        )
+        for retry_result in retry_results:
+            _attach_backfill_metadata(
+                retry_result,
+                attempt=attempt,
+                previous_failures=previous_failures.get(retry_result.device_id, []),
+            )
+            results_by_device[retry_result.device_id] = retry_result
+
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event_type": "backfill_finished",
+                    "message": (
+                        f"Backfill finished: platform={platform}, "
+                        f"prompt_index={prompt_index}, attempt={attempt}/{retry_count}"
+                    ),
+                    "status": "running",
+                    "current_platform": platform,
+                    "current_repeat_index": repeat_index,
+                    "current_prompt_index": prompt_index,
+                    "current_prompt": prompt,
+                    "records": [_device_progress_record(result) for result in retry_results],
+                }
+            )
+
+    return sorted(results_by_device.values(), key=lambda item: item.device_id)
+
+
+def _needs_failed_record_backfill(record: DeviceRunRecord) -> bool:
+    if record.status != "succeeded":
+        return True
+    if not isinstance(record.result, dict):
+        return True
+    response = str(record.result.get("response") or "").strip()
+    return not response
+
+
+def _attach_backfill_metadata(
+    record: DeviceRunRecord,
+    *,
+    attempt: int,
+    previous_failures: list[dict[str, object]],
+) -> None:
+    if not isinstance(record.result, dict):
+        return
+    platform_extra = record.result.get("platform_extra")
+    if not isinstance(platform_extra, dict):
+        platform_extra = {}
+    platform_extra["backfill"] = {
+        "attempt": attempt,
+        "previous_failures": previous_failures,
+    }
+    record.result["platform_extra"] = platform_extra
 
 
 def _device_progress_record(record: DeviceRunRecord) -> dict[str, object]:
@@ -773,6 +928,10 @@ def _empty_references() -> dict[str, object]:
 
 
 def _result_integrity_error(result: dict[str, object]) -> str | None:
+    response = str(result.get("response") or "").strip()
+    if not response:
+        return "response empty"
+
     platform_extra = result.get("platform_extra")
     if not isinstance(platform_extra, dict):
         return None
@@ -823,6 +982,52 @@ def _aggregate_overall_status(
     if failed_batches == total_batches:
         return "failed"
     return "partial_failed"
+
+
+def _get_failed_record_retry_count(task_env: dict[str, Any]) -> int:
+    raw = (
+        _first_non_empty_config_value(
+            task_env.get("failed_record_retry_count"),
+            task_env.get("failedRecordRetryCount"),
+            os.getenv("CRAWLER_FAILED_RECORD_RETRY_COUNT"),
+        )
+        or "1"
+    )
+    try:
+        return max(0, int(raw))
+    except ValueError as exc:
+        raise ValueError(f"CRAWLER_FAILED_RECORD_RETRY_COUNT must be an integer, got {raw!r}") from exc
+
+
+def _get_failed_record_retry_delay_seconds(task_env: dict[str, Any]) -> float:
+    raw = (
+        _first_non_empty_config_value(
+            task_env.get("failed_record_retry_delay_seconds"),
+            task_env.get("failedRecordRetryDelaySeconds"),
+            os.getenv("CRAWLER_FAILED_RECORD_RETRY_DELAY_SECONDS"),
+        )
+        or "2"
+    )
+    try:
+        return max(0.0, float(raw))
+    except ValueError as exc:
+        raise ValueError(
+            "CRAWLER_FAILED_RECORD_RETRY_DELAY_SECONDS must be a number, "
+            f"got {raw!r}"
+        ) from exc
+
+
+def _first_non_empty_config_value(*values: object) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+            continue
+        return str(value)
+    return None
 
 
 def _utc_now() -> str:

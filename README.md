@@ -98,6 +98,8 @@ CRAWLER_PROGRESS_API_KEY=your-callback-api-key
 CRAWLER_RECORD_TIMEOUT_SECONDS=300
 CRAWLER_BATCH_TIMEOUT_SECONDS=3600
 CRAWLER_BATCH_MAX_WORKERS=5
+CRAWLER_FAILED_RECORD_RETRY_COUNT=1
+CRAWLER_FAILED_RECORD_RETRY_DELAY_SECONDS=2
 PIPELINE_LLM_API_KEY=your-llm-api-key
 PIPELINE_METRIC_KEYWORD=你的品牌名
 PIPELINE_METRIC_DETECT_TYPE=rank
@@ -250,7 +252,8 @@ Invoke-RestMethod `
 - `POST /api/v1/tasks/{platform_id}` 是异步入队，只表示任务已接收。
 - 单条 prompt 的硬超时由 `CRAWLER_RECORD_TIMEOUT_SECONDS` 控制，默认 `300` 秒。
 - 整个批任务的总超时由 `CRAWLER_BATCH_TIMEOUT_SECONDS` 控制，默认 `3600` 秒。
-- 超时后该条会标记为失败，`GET /api/v1/tasks/<task_id>` 和 `/results` 会返回 `status/error/failed_records`。
+- 单条设备结果失败、超时或空响应后，会按 `CRAWLER_FAILED_RECORD_RETRY_COUNT` 回补重跑失败设备，默认 `1` 次。
+- 回补仍失败后该条才会保留为失败，`GET /api/v1/tasks/<task_id>` 和 `/results` 会返回 `status/error/failed_records`。
 
 支持的 API 平台 ID：
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 import xml.etree.ElementTree as ET
 
@@ -17,6 +18,8 @@ class DeepseekWorkflow(ComposeChatWorkflow):
     COPY_BUTTON_POLL_INTERVAL_SECONDS = 0.35
     COPY_BUTTON_SCROLL_INTERVAL_SECONDS = 1.0
     CLIPBOARD_UPDATE_WAIT_SECONDS = 2.0
+    CITED_SNIPPET_MAX_COMPACT_LENGTH = 260
+    CITED_SNIPPET_MAX_LINE_COUNT = 2
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__(settings, settings.deepseek)
@@ -29,7 +32,7 @@ class DeepseekWorkflow(ComposeChatWorkflow):
         return self._build_references_payload()
 
     def _finalize_response(self, driver: U2Driver, *, prompt: str, response: str) -> str:
-        copied = self._wait_for_copy_button_and_read_clipboard(driver, prompt=prompt)
+        copied = self._wait_for_copy_button_and_read_clipboard(driver, prompt=prompt, visible_response=response)
         if copied:
             return copied
 
@@ -108,7 +111,13 @@ class DeepseekWorkflow(ComposeChatWorkflow):
 
         return toggles
 
-    def _wait_for_copy_button_and_read_clipboard(self, driver: U2Driver, *, prompt: str) -> str:
+    def _wait_for_copy_button_and_read_clipboard(
+        self,
+        driver: U2Driver,
+        *,
+        prompt: str,
+        visible_response: str,
+    ) -> str:
         sentinel = f"__WUYING_DEEPSEEK_CLIPBOARD_{time.time_ns()}__"
         try:
             driver.device.clipboard = sentinel
@@ -119,6 +128,7 @@ class DeepseekWorkflow(ComposeChatWorkflow):
         logger.info("Waiting for DeepSeek answer copy button.")
         deadline = time.monotonic() + self.COPY_BUTTON_WAIT_SECONDS
         last_scroll_ts = 0.0
+        best_candidate = visible_response.strip() if isinstance(visible_response, str) else ""
         while time.monotonic() < deadline:
             root = driver.dump_hierarchy_root()
             bounds = self._find_completed_response_copy_bounds(root)
@@ -129,9 +139,17 @@ class DeepseekWorkflow(ComposeChatWorkflow):
                     x=(left + right) // 2,
                     y=(top + bottom) // 2,
                 )
-                copied = self._read_valid_clipboard(driver, sentinel=sentinel, prompt=prompt)
-                if copied:
+                copied = self._read_clipboard_candidate(driver, sentinel=sentinel, prompt=prompt)
+                if copied and len(copied) > len(best_candidate):
+                    best_candidate = copied
+                if copied and self._looks_like_complete_response(prompt=prompt, response=copied):
                     return copied
+                if copied:
+                    logger.info(
+                        "DeepSeek copied response candidate rejected as incomplete: chars=%s compact=%s",
+                        len(copied),
+                        len(self._compact_text(copied)),
+                    )
 
             now = time.monotonic()
             if now - last_scroll_ts >= self.COPY_BUTTON_SCROLL_INTERVAL_SECONDS:
@@ -139,9 +157,11 @@ class DeepseekWorkflow(ComposeChatWorkflow):
                 last_scroll_ts = now
             time.sleep(self.COPY_BUTTON_POLL_INTERVAL_SECONDS)
 
+        if best_candidate and self._looks_like_complete_response(prompt=prompt, response=best_candidate):
+            return best_candidate
         return ""
 
-    def _read_valid_clipboard(self, driver: U2Driver, *, sentinel: str, prompt: str) -> str:
+    def _read_clipboard_candidate(self, driver: U2Driver, *, sentinel: str, prompt: str) -> str:
         deadline = time.monotonic() + self.CLIPBOARD_UPDATE_WAIT_SECONDS
         prompt_norm = self._normalize_text(prompt)
         while time.monotonic() < deadline:
@@ -161,6 +181,37 @@ class DeepseekWorkflow(ComposeChatWorkflow):
                     return copied
             time.sleep(0.12)
         return ""
+
+    def _looks_like_complete_response(self, *, prompt: str, response: str) -> bool:
+        return self._invalid_response_reason(prompt=prompt, response=response) is None
+
+    @classmethod
+    def _invalid_response_reason(cls, *, prompt: str, response: str) -> str | None:
+        base_reason = super()._invalid_response_reason(prompt=prompt, response=response)
+        if base_reason:
+            return base_reason
+
+        text = response.strip() if isinstance(response, str) else ""
+        if cls._looks_like_citation_snippet(prompt=prompt, response=text):
+            return "captured cited snippet instead of complete answer"
+        return None
+
+    @classmethod
+    def _looks_like_citation_snippet(cls, *, prompt: str, response: str) -> bool:
+        if cls._prompt_allows_short_response(prompt=prompt, response=response):
+            return False
+
+        if "[citation:" not in response:
+            return False
+
+        compact = cls._compact_text(response)
+        lines = [line for line in response.splitlines() if line.strip()]
+        citation_count = len(re.findall(r"\[citation:\d+\]", response))
+        if len(lines) <= cls.CITED_SNIPPET_MAX_LINE_COUNT and len(compact) <= cls.CITED_SNIPPET_MAX_COMPACT_LENGTH:
+            return True
+        if citation_count >= 1 and len(compact) <= cls.CITED_SNIPPET_MAX_COMPACT_LENGTH:
+            return True
+        return False
 
     def _find_completed_response_copy_bounds(self, root: ET.Element) -> tuple[int, int, int, int] | None:
         parent_map = {child: parent for parent in root.iter() for child in parent}
