@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from wuying.application.batch_models import BatchTaskRequest, DeviceRunRecord
 from wuying.application.device_pool import DeviceTarget
@@ -17,6 +18,36 @@ from wuying.config import AppSettings
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[dict[str, object]], None]
+
+
+class BatchDeadline:
+    def __init__(self, timeout_seconds: int | None) -> None:
+        self.timeout_seconds = timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
+        self.expires_at = (
+            datetime.now(tz=UTC).timestamp() + self.timeout_seconds
+            if self.timeout_seconds is not None
+            else None
+        )
+
+    def expired(self) -> bool:
+        return self.remaining_seconds() == 0
+
+    def remaining_seconds(self) -> int | None:
+        if self.expires_at is None:
+            return None
+        remaining = self.expires_at - datetime.now(tz=UTC).timestamp()
+        if remaining <= 0:
+            return 0
+        return max(1, int(remaining))
+
+    def record_timeout(self, configured_timeout_seconds: int) -> int:
+        remaining = self.remaining_seconds()
+        if remaining is None:
+            return max(1, configured_timeout_seconds)
+        return max(0, min(configured_timeout_seconds, remaining))
+
+    def message(self) -> str:
+        return f"Batch task timed out after {self.timeout_seconds}s"
 
 
 def run_batch_job_with_workers(
@@ -31,9 +62,7 @@ def run_batch_job_with_workers(
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, object]:
     started_at = _utc_now()
-    deadline = None
-    if batch_timeout_seconds and batch_timeout_seconds > 0:
-        deadline = datetime.now(tz=UTC).timestamp() + batch_timeout_seconds
+    deadline = BatchDeadline(batch_timeout_seconds)
 
     task_root_dir = _task_root_dir(settings, task_id)
     raw_dir = task_root_dir / "raw"
@@ -79,9 +108,9 @@ def run_batch_job_with_workers(
             )
         for repeat_index in range(1, request.repeat + 1):
             for prompt_index, prompt in enumerate(request.prompts, start=1):
-                if deadline is not None and datetime.now(tz=UTC).timestamp() > deadline:
+                if deadline.expired():
                     stopped_reason = (
-                        f"Batch task timed out after {batch_timeout_seconds}s before "
+                        f"{deadline.message()} before "
                         f"platform={platform}, repeat_index={repeat_index}, prompt_index={prompt_index}"
                     )
                     last_error = stopped_reason
@@ -112,6 +141,7 @@ def run_batch_job_with_workers(
 
                 prompt_started_at = _utc_now()
                 device_results = _run_platform_prompt_on_devices(
+                    settings=settings,
                     worker_manager=worker_manager,
                     platform=platform,
                     prompt=prompt,
@@ -119,9 +149,12 @@ def run_batch_job_with_workers(
                     repeat_index=repeat_index,
                     devices=devices,
                     record_timeout_seconds=record_timeout_seconds,
+                    deadline=deadline,
+                    attempt_index=1,
                     progress_callback=progress_callback,
                 )
-                device_results = _backfill_failed_device_results(
+                device_results, attempt_results = _backfill_failed_device_results(
+                    settings=settings,
                     worker_manager=worker_manager,
                     platform=platform,
                     prompt=prompt,
@@ -130,6 +163,7 @@ def run_batch_job_with_workers(
                     devices=devices,
                     initial_results=device_results,
                     record_timeout_seconds=record_timeout_seconds,
+                    deadline=deadline,
                     retry_count=failed_record_retry_count,
                     retry_delay_seconds=failed_record_retry_delay_seconds,
                     progress_callback=progress_callback,
@@ -139,16 +173,23 @@ def run_batch_job_with_workers(
                 if batch_status != "succeeded":
                     failed_batches += 1
 
-                for device_result in device_results:
+                final_keys = {(item.device_id, item.attempt_index) for item in device_results}
+                for attempt_result in attempt_results:
+                    attempt_result.is_final_attempt = (
+                        attempt_result.device_id,
+                        attempt_result.attempt_index,
+                    ) in final_keys
                     output_record = _build_output_record(
-                        device_result,
+                        attempt_result,
                         raw_dir=raw_dir,
                     )
+                    if not attempt_result.is_final_attempt:
+                        continue
                     records.append(output_record)
                     finished_records += 1
-                    if device_result.status != "succeeded":
+                    if attempt_result.status != "succeeded":
                         failed_records += 1
-                        last_error = device_result.error or last_error
+                        last_error = attempt_result.error or last_error
 
                 prompt_files = _write_prompt_result_files(
                     prompt_dir,
@@ -197,6 +238,15 @@ def run_batch_job_with_workers(
                             ],
                         }
                     )
+
+                if deadline.expired():
+                    stopped_reason = (
+                        f"{deadline.message()} after platform={platform}, "
+                        f"repeat_index={repeat_index}, prompt_index={prompt_index}"
+                    )
+                    last_error = stopped_reason
+                    logger.warning(stopped_reason)
+                    break
 
             if stopped_reason is not None:
                 break
@@ -254,6 +304,7 @@ def run_batch_job_with_workers(
 
 def _run_platform_prompt_on_devices(
     *,
+    settings: AppSettings,
     worker_manager: WorkerManager,
     platform: str,
     prompt: str,
@@ -261,9 +312,11 @@ def _run_platform_prompt_on_devices(
     repeat_index: int,
     devices: list[DeviceTarget],
     record_timeout_seconds: int,
+    deadline: BatchDeadline,
+    attempt_index: int,
     progress_callback: ProgressCallback | None = None,
 ) -> list[DeviceRunRecord]:
-    max_workers = max(1, len(devices))
+    max_workers = max(1, min(len(devices), settings.batch_max_workers))
     results: list[DeviceRunRecord] = []
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"{platform}-devices") as executor:
         if progress_callback is not None:
@@ -288,6 +341,7 @@ def _run_platform_prompt_on_devices(
                             "query": prompt,
                             "prompt": prompt,
                             "status": "running",
+                            "attempt_index": attempt_index,
                             "started_at": _utc_now(),
                             "finished_at": None,
                             "result_path": None,
@@ -305,6 +359,8 @@ def _run_platform_prompt_on_devices(
                 repeat_index=repeat_index,
                 device=device,
                 record_timeout_seconds=record_timeout_seconds,
+                deadline=deadline,
+                attempt_index=attempt_index,
             ): device
             for device in devices
         }
@@ -331,6 +387,7 @@ def _run_platform_prompt_on_devices(
 
 def _backfill_failed_device_results(
     *,
+    settings: AppSettings,
     worker_manager: WorkerManager,
     platform: str,
     prompt: str,
@@ -339,18 +396,22 @@ def _backfill_failed_device_results(
     devices: list[DeviceTarget],
     initial_results: list[DeviceRunRecord],
     record_timeout_seconds: int,
+    deadline: BatchDeadline,
     retry_count: int,
     retry_delay_seconds: float,
     progress_callback: ProgressCallback | None = None,
-) -> list[DeviceRunRecord]:
+) -> tuple[list[DeviceRunRecord], list[DeviceRunRecord]]:
+    attempt_results = list(initial_results)
     if retry_count <= 0:
-        return initial_results
+        return initial_results, attempt_results
 
     results_by_device = {result.device_id: result for result in initial_results}
     devices_by_id = {device.device_id: device for device in devices}
     previous_failures: dict[str, list[dict[str, object]]] = {}
 
     for attempt in range(1, retry_count + 1):
+        if deadline.expired():
+            break
         failed_results = [
             result
             for result in results_by_device.values()
@@ -402,9 +463,13 @@ def _backfill_failed_device_results(
             )
 
         if retry_delay_seconds > 0:
-            time.sleep(retry_delay_seconds)
+            remaining = deadline.remaining_seconds()
+            if remaining == 0:
+                break
+            time.sleep(min(retry_delay_seconds, remaining) if remaining is not None else retry_delay_seconds)
 
         retry_results = _run_platform_prompt_on_devices(
+            settings=settings,
             worker_manager=worker_manager,
             platform=platform,
             prompt=prompt,
@@ -412,8 +477,11 @@ def _backfill_failed_device_results(
             repeat_index=repeat_index,
             devices=retry_devices,
             record_timeout_seconds=record_timeout_seconds,
+            deadline=deadline,
+            attempt_index=attempt + 1,
             progress_callback=progress_callback,
         )
+        attempt_results.extend(retry_results)
         for retry_result in retry_results:
             _attach_backfill_metadata(
                 retry_result,
@@ -439,7 +507,10 @@ def _backfill_failed_device_results(
                 }
             )
 
-    return sorted(results_by_device.values(), key=lambda item: item.device_id)
+    return (
+        sorted(results_by_device.values(), key=lambda item: item.device_id),
+        sorted(attempt_results, key=lambda item: (item.device_id, item.attempt_index)),
+    )
 
 
 def _needs_failed_record_backfill(record: DeviceRunRecord) -> bool:
@@ -481,6 +552,8 @@ def _device_progress_record(record: DeviceRunRecord) -> dict[str, object]:
         "query": record.prompt,
         "prompt": record.prompt,
         "status": record.status,
+        "attempt_index": record.attempt_index,
+        "is_final_attempt": record.is_final_attempt,
         "started_at": record.started_at,
         "finished_at": record.finished_at,
         "result_path": record.result_path,
@@ -497,22 +570,43 @@ def _run_device(
     repeat_index: int,
     device: DeviceTarget,
     record_timeout_seconds: int,
+    deadline: BatchDeadline,
+    attempt_index: int,
 ) -> DeviceRunRecord:
     started_at = _utc_now()
+    timeout_seconds = deadline.record_timeout(record_timeout_seconds)
+    if timeout_seconds <= 0:
+        finished_at = _utc_now()
+        return DeviceRunRecord(
+            device_id=device.device_id,
+            instance_id=device.instance_id,
+            adb_endpoint=device.adb_endpoint,
+            platform=platform,
+            prompt=prompt,
+            prompt_index=prompt_index,
+            repeat_index=repeat_index,
+            status="timeout",
+            started_at=started_at,
+            finished_at=finished_at,
+            attempt_index=attempt_index,
+            error="Batch timeout reached before device run started",
+        )
     logger.info(
-        "Device run started: platform=%s device=%s instance=%s repeat=%s prompt_index=%s",
+        "Device run started: platform=%s device=%s instance=%s repeat=%s prompt_index=%s attempt=%s timeout=%ss",
         platform,
         device.device_id,
         device.instance_id,
         repeat_index,
         prompt_index,
+        attempt_index,
+        timeout_seconds,
     )
     try:
         result = worker_manager.run_on_device(
             device=device,
             platform=platform,
             prompt=prompt,
-            timeout_seconds=record_timeout_seconds,
+            timeout_seconds=timeout_seconds,
             save_result=False,
         )
         integrity_error = _result_integrity_error(result)
@@ -545,6 +639,7 @@ def _run_device(
             status="failed" if integrity_error else "succeeded",
             started_at=started_at,
             finished_at=finished_at,
+            attempt_index=attempt_index,
             result_path=str(result.get("output_path") or "") or None,
             error=integrity_error,
             result=result,
@@ -570,6 +665,7 @@ def _run_device(
             status="timeout",
             started_at=started_at,
             finished_at=finished_at,
+            attempt_index=attempt_index,
             error=str(exc),
         )
     except Exception as exc:
@@ -593,6 +689,7 @@ def _run_device(
             status="failed",
             started_at=started_at,
             finished_at=finished_at,
+            attempt_index=attempt_index,
             error=str(exc),
         )
 
@@ -613,6 +710,8 @@ def _build_output_record(record: DeviceRunRecord, *, raw_dir: Path) -> dict[str,
         "prompt": record.prompt,
         "prompt_index": record.prompt_index,
         "repeat_index": record.repeat_index,
+        "attempt_index": record.attempt_index,
+        "is_final_attempt": record.is_final_attempt,
         "response": response,
         "references": references,
         "raw_output_path": None,
@@ -630,7 +729,7 @@ def _write_raw_record(record: DeviceRunRecord, payload: dict[str, object], *, ra
     raw_path = raw_dir / (
         f"{_safe_filename_part(record.platform)}_"
         f"{_safe_filename_part(record.device_id)}_"
-        f"p{record.prompt_index:03d}_r{record.repeat_index:03d}.json"
+        f"p{record.prompt_index:03d}_r{record.repeat_index:03d}_a{record.attempt_index:03d}.json"
     )
     raw_payload = dict(payload)
     raw_payload["raw_output_path"] = str(raw_path)
@@ -912,21 +1011,26 @@ def _coerce_int(value: object, *, default: int) -> int:
 def _write_json_atomic(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(payload, ensure_ascii=False, indent=2)
-    tmp_path = path.with_suffix(".tmp")
+    try:
+        path.write_text(content, encoding="utf-8")
+        return
+    except PermissionError:
+        logger.debug("Direct result write failed, falling back to replace: %s", path)
+    tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     tmp_path.write_text(content, encoding="utf-8")
-    for attempt in range(5):
+    for attempt in range(10):
         try:
             tmp_path.replace(path)
             return
         except PermissionError:
-            if attempt == 4:
+            if attempt == 9:
                 path.write_text(content, encoding="utf-8")
                 try:
                     tmp_path.unlink(missing_ok=True)
                 except PermissionError:
-                    logger.warning("Temporary result file is locked and cannot be removed: %s", tmp_path)
+                    logger.debug("Temporary result file is locked and cannot be removed: %s", tmp_path)
                 return
-            time.sleep(0.2)
+            time.sleep(0.5)
 
 
 def _safe_filename_part(value: str) -> str:
@@ -983,11 +1087,11 @@ def _aggregate_overall_status(
     stopped_reason: str | None,
 ) -> str:
     if total_batches == 0:
-        return "failed"
+        return "timeout" if stopped_reason else "failed"
     if stopped_reason and failed_batches:
-        return "partial_failed"
+        return "timeout" if failed_batches == total_batches else "partial_failed"
     if stopped_reason:
-        return "failed"
+        return "timeout"
     if failed_batches == 0:
         return "succeeded"
     if failed_batches == total_batches:
@@ -1002,7 +1106,7 @@ def _get_failed_record_retry_count(task_env: dict[str, Any]) -> int:
             task_env.get("failedRecordRetryCount"),
             os.getenv("CRAWLER_FAILED_RECORD_RETRY_COUNT"),
         )
-        or "1"
+        or "0"
     )
     try:
         return max(0, int(raw))

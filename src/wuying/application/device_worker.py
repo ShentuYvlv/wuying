@@ -31,6 +31,8 @@ def device_worker_main(
                 "type": "worker_ready",
                 "device_id": device.device_id,
                 "started_at": _utc_now(),
+                "connection_state": "not_connected",
+                "driver_ready": False,
             }
         )
     except Exception:
@@ -76,6 +78,8 @@ def device_worker_main(
                     "request_id": request_id,
                     "status": "succeeded",
                     "result": result,
+                    "connection_state": "driver_ready",
+                    "driver_ready": True,
                     "finished_at": _utc_now(),
                 }
             )
@@ -92,6 +96,8 @@ def device_worker_main(
                     "request_id": request_id,
                     "status": "failed",
                     "error": error,
+                    "connection_state": "failed",
+                    "driver_ready": False,
                     "finished_at": _utc_now(),
                 }
             )

@@ -28,6 +28,8 @@ class DeviceRunRecord:
     status: str
     started_at: str
     finished_at: str
+    attempt_index: int = 1
+    is_final_attempt: bool = True
     result_path: str | None = None
     error: str | None = None
     result: dict[str, Any] | None = None
@@ -44,6 +46,8 @@ class DeviceRunRecord:
             "status": self.status,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "attempt_index": self.attempt_index,
+            "is_final_attempt": self.is_final_attempt,
             "result_path": self.result_path,
             "error": self.error,
             "result": self.result,

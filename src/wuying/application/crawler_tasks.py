@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import queue
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,7 +15,7 @@ import httpx
 
 from wuying.application.batch_models import BatchTaskRequest
 from wuying.application.batch_runner import resolve_batch_devices, run_batch_job
-from wuying.application.device_lease import DeviceLeaseError, DeviceLeaseManager
+from wuying.application.device_lease import DeviceLeaseManager
 from wuying.application.device_pool import load_device_pool
 from wuying.application.platform_registry import available_platform_names, get_platform_definition
 from wuying.application.worker_manager import WorkerManager
@@ -123,6 +123,7 @@ class TaskStore:
                     _coerce_int(item.get("repeat_index"), default=0),
                     str(item.get("platform") or ""),
                     str(item.get("device_id") or ""),
+                    _coerce_int(item.get("attempt_index"), default=1),
                 ),
             )
 
@@ -155,9 +156,27 @@ class TaskStore:
 
     def _write_atomic(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp_path.replace(path)
+        content = json.dumps(payload, ensure_ascii=False, indent=2)
+        try:
+            path.write_text(content, encoding="utf-8")
+            return
+        except PermissionError:
+            logger.debug("Direct task status write failed, falling back to replace: %s", path)
+        tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        tmp_path.write_text(content, encoding="utf-8")
+        for attempt in range(10):
+            try:
+                tmp_path.replace(path)
+                return
+            except PermissionError:
+                if attempt == 9:
+                    path.write_text(content, encoding="utf-8")
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except PermissionError:
+                        logger.debug("Temporary task status file is locked and cannot be removed: %s", tmp_path)
+                    return
+                time.sleep(0.5)
 
 
 class CrawlerTaskService:
@@ -171,23 +190,28 @@ class CrawlerTaskService:
             stale_after_seconds=settings.device.device_lease_ttl_seconds,
         )
         self.worker_manager = WorkerManager(settings)
-        self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
-        self._worker: threading.Thread | None = None
+        self._task_executor: ThreadPoolExecutor | None = None
+        self._futures: set[Future[None]] = set()
+        self._reserved_device_ids: set[str] = set()
+        self._reservation_lock = threading.Lock()
         self._stop_event = threading.Event()
 
     def start(self) -> None:
-        if self._worker is not None and self._worker.is_alive():
+        if self._task_executor is not None:
             return
         self._stop_event.clear()
         self.worker_manager.start_all(load_device_pool(self.settings).enabled_devices())
-        self._worker = threading.Thread(target=self._worker_loop, name="wuying-task-worker", daemon=True)
-        self._worker.start()
+        self._task_executor = ThreadPoolExecutor(
+            max_workers=max(1, self.settings.batch_max_workers),
+            thread_name_prefix="wuying-task",
+        )
 
     def stop(self) -> None:
         self._stop_event.set()
-        self._queue.put(None)
-        if self._worker is not None:
-            self._worker.join(timeout=10)
+        executor = self._task_executor
+        self._task_executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
         self.worker_manager.stop_all()
 
     def submit(self, request: CrawlerTaskRequest) -> dict[str, Any]:
@@ -264,10 +288,8 @@ class CrawlerTaskService:
     ) -> dict[str, Any]:
         devices = resolve_batch_devices(self.settings, batch_request)
         task_id = _build_task_id()
-        try:
-            self.lease_manager.acquire_many([device.device_id for device in devices], owner=task_id)
-        except DeviceLeaseError as exc:
-            raise TaskConflictError(str(exc)) from exc
+        device_ids = [device.device_id for device in devices]
+        self._reserve_devices_or_raise(device_ids, owner=task_id)
 
         created_at = _utc_now()
         output_dir = self.store.dir_for(task_id) / "prompts"
@@ -291,7 +313,7 @@ class CrawlerTaskService:
             "repeat": batch_request.repeat,
             "env": dict(batch_request.env),
             "instance_id": getattr(raw_request, "instance_id", None),
-            "device_ids": [device.device_id for device in devices],
+            "device_ids": device_ids,
             "selected_devices": [device.to_dict() for device in devices],
             "platforms": batch_request.platforms,
             "platform_ids": platform_ids,
@@ -305,41 +327,76 @@ class CrawlerTaskService:
             "started_at": None,
             "finished_at": None,
         }
-        self.store.create(task_payload)
-        self._queue.put(
-            {
-                "task_id": task_id,
-                "batch_request": batch_request,
-                "devices": devices,
-                "platform_ids": platform_ids,
-            }
-        )
+        try:
+            self.store.create(task_payload)
+            self._submit_execution(
+                {
+                    "task_id": task_id,
+                    "batch_request": batch_request,
+                    "devices": devices,
+                    "platform_ids": platform_ids,
+                }
+            )
+        except Exception:
+            self._release_reservation(device_ids)
+            raise
         return task_payload
 
-    def _worker_loop(self) -> None:
-        while not self._stop_event.is_set():
-            item = self._queue.get()
-            if item is None:
-                self._queue.task_done()
-                break
-            try:
-                self._execute_task(item)
-            finally:
-                self._queue.task_done()
+    def _submit_execution(self, item: dict[str, Any]) -> None:
+        executor = self._task_executor
+        if executor is None:
+            raise RuntimeError("CrawlerTaskService is not started.")
+        future = executor.submit(self._execute_task, item)
+        with self._reservation_lock:
+            self._futures.add(future)
+        future.add_done_callback(self._forget_future)
+
+    def _forget_future(self, future: Future[None]) -> None:
+        with self._reservation_lock:
+            self._futures.discard(future)
+
+    def _reserve_devices_or_raise(self, device_ids: list[str], *, owner: str) -> None:
+        unique_device_ids = sorted(set(device_ids))
+        with self._reservation_lock:
+            reserved = [device_id for device_id in unique_device_ids if device_id in self._reserved_device_ids]
+            if reserved:
+                raise TaskConflictError(
+                    f"Device {', '.join(reserved)} is already reserved by another running task."
+                )
+
+            leased: list[str] = []
+            for device_id in unique_device_ids:
+                lease = self.lease_manager.read(device_id)
+                if lease is not None:
+                    leased.append(f"{device_id}({lease.owner})")
+            if leased:
+                raise TaskConflictError(f"Device {', '.join(leased)} is already leased.")
+
+            self._reserved_device_ids.update(unique_device_ids)
+
+    def _release_reservation(self, device_ids: list[str]) -> None:
+        with self._reservation_lock:
+            for device_id in set(device_ids):
+                self._reserved_device_ids.discard(device_id)
 
     def _execute_task(self, item: dict[str, Any]) -> None:
         task_id = str(item["task_id"])
         batch_request = item["batch_request"]
         devices = item["devices"]
+        device_ids = [device.device_id for device in devices]
         started_at = _utc_now()
-        self.store.update(
-            task_id,
-            {
-                "status": "running",
-                "started_at": started_at,
-            },
-        )
+        lease_acquired = False
+        task = self.store.get(task_id)
         try:
+            self.lease_manager.acquire_many(device_ids, owner=task_id)
+            lease_acquired = True
+            self.store.update(
+                task_id,
+                {
+                    "status": "running",
+                    "started_at": started_at,
+                },
+            )
             batch_result = run_batch_job(
                 settings=self.settings,
                 task_id=task_id,
@@ -381,10 +438,12 @@ class CrawlerTaskService:
                 },
             )
         finally:
-            try:
-                self.lease_manager.release_many([device.device_id for device in devices], owner=task_id)
-            except Exception as exc:
-                logger.warning("Failed to release task device leases: task_id=%s error=%s", task_id, exc)
+            if lease_acquired:
+                try:
+                    self.lease_manager.release_many(device_ids, owner=task_id)
+                except Exception as exc:
+                    logger.warning("Failed to release task device leases: task_id=%s error=%s", task_id, exc)
+            self._release_reservation(device_ids)
 
         callback_info = self._upload_callback(task)
         self.store.update(task_id, {"callback": callback_info})

@@ -37,7 +37,7 @@ def run_batch_job(
     owns_manager = worker_manager is None
     manager = worker_manager or WorkerManager(settings)
     try:
-        manager.start_all(devices)
+        manager.start_all(devices, strict=False)
         return run_batch_job_with_workers(
             settings=settings,
             worker_manager=manager,

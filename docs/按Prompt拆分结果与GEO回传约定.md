@@ -35,18 +35,21 @@ data/tasks/{task_id}/prompts/{年-月-日-时}-{platform}-p{prompt_index}-{promp
 单设备、单平台、单 prompt 的记录文件。
 
 成功、失败、超时都会写入这里。
+如果启用了失败回补，每一次 attempt 都会单独写入，文件名包含 `_a001/_a002` 等 attempt 序号。
 
 用途：
 
 - `/api/v2/batches/{task_id}/results` 聚合读取
 - 本地排查
 - `raw_output_path` 指向这里
+- `attempt_index` 和 `is_final_attempt` 用于区分原始失败尝试与最终采用的尝试
 
 ### prompts/*.json
 
 最终业务回传文件。
 
 每个文件对应一个平台和一个 prompt，内容是该平台、该 prompt 下所有设备 records。
+如果启用了失败回补，这里只包含每台设备最终采用的 attempt；完整 attempt 历史仍以 `raw/*.json` 为准。
 
 如果一个任务包含：
 

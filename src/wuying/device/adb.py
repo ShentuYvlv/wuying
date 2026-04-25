@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -28,7 +29,7 @@ class AdbClient:
     def connect(self, endpoint: AdbEndpoint) -> str:
         self.ensure_server()
         with self._acquire_process_lock(
-            "adb-connect",
+            self._connect_lock_name(endpoint.serial),
             timeout_seconds=self.settings.adb_connect_timeout_seconds + 30,
         ):
             if self.is_connected(endpoint.serial):
@@ -80,7 +81,7 @@ class AdbClient:
             raise AdbError(f"adb connect failed for {endpoint.serial}: unknown error")
 
     def disconnect(self, serial: str) -> None:
-        with self._acquire_process_lock("adb-connect", timeout_seconds=20):
+        with self._acquire_process_lock(self._connect_lock_name(serial), timeout_seconds=20):
             self._run([self.settings.adb_path, "disconnect", serial], timeout=10)
 
     def shell(self, serial: str, *parts: str, timeout: int = 30) -> str:
@@ -355,6 +356,11 @@ class AdbClient:
         root = self.settings.device_lease_dir.parent / "locks"
         root.mkdir(parents=True, exist_ok=True)
         return root
+
+    @staticmethod
+    def _connect_lock_name(serial: str) -> str:
+        safe_serial = re.sub(r"[^A-Za-z0-9._-]+", "_", serial).strip("._")
+        return f"adb-connect-{safe_serial or 'unknown'}"
 
 
 class _DirectoryLock:

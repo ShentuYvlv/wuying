@@ -36,6 +36,8 @@ class WorkerHandle:
     current_request_id: str | None = None
     current_platform: str | None = None
     current_prompt: str | None = None
+    connection_state: str = "not_connected"
+    driver_ready: bool = False
     last_finished_at: str | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -50,6 +52,9 @@ class WorkerHandle:
             "current_request_id": self.current_request_id,
             "current_platform": self.current_platform,
             "current_prompt": self.current_prompt,
+            "connection_state": self.connection_state,
+            "driver_ready": self.driver_ready,
+            "ready_for_task": self.state == "idle" and self.driver_ready,
             "last_finished_at": self.last_finished_at,
         }
 
@@ -61,9 +66,10 @@ class WorkerManager:
         self._handles: dict[str, WorkerHandle] = {}
         self._manager_lock = threading.Lock()
 
-    def start_all(self, devices: list[DeviceTarget]) -> None:
+    def start_all(self, devices: list[DeviceTarget], *, strict: bool = False) -> None:
         if not devices:
             return
+        errors: list[str] = []
         max_workers = max(1, len(devices))
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="worker-startup") as executor:
             futures = {executor.submit(self.ensure_worker, device): device for device in devices}
@@ -73,7 +79,10 @@ class WorkerManager:
                     future.result()
                 except Exception as exc:
                     logger.warning("Failed to start device worker: device_id=%s error=%s", device.device_id, exc)
+                    errors.append(f"{device.device_id}: {exc}")
                     continue
+        if strict and errors:
+            raise WorkerManagerError("Failed to start device workers: " + "; ".join(errors))
 
     def stop_all(self) -> None:
         with self._manager_lock:
@@ -167,10 +176,14 @@ class WorkerManager:
             if message.get("status") == "succeeded":
                 handle.state = "idle"
                 handle.last_error = None
+                handle.connection_state = "driver_ready"
+                handle.driver_ready = True
                 return dict(message["result"])
 
             handle.state = "failed"
             handle.last_error = str(message.get("error") or "device worker failed")
+            handle.connection_state = "failed"
+            handle.driver_ready = False
             self.restart_worker(device.device_id)
             raise WorkerManagerError(handle.last_error)
 
@@ -199,10 +212,14 @@ class WorkerManager:
             if message_type == "worker_ready":
                 handle.state = "idle"
                 handle.started_at = str(message.get("started_at") or _utc_now())
+                handle.connection_state = str(message.get("connection_state") or "not_connected")
+                handle.driver_ready = bool(message.get("driver_ready", False))
                 continue
             if message_type == "worker_failed":
                 handle.state = "failed"
                 handle.last_error = str(message.get("error") or "worker startup failed")
+                handle.connection_state = "failed"
+                handle.driver_ready = False
                 raise WorkerManagerError(handle.last_error)
             if message_type == "task_result" and message.get("request_id") == request_id:
                 return message
@@ -259,10 +276,14 @@ class WorkerManager:
             if message_type == "worker_ready":
                 handle.state = "idle"
                 handle.started_at = str(message.get("started_at") or _utc_now())
+                handle.connection_state = str(message.get("connection_state") or "not_connected")
+                handle.driver_ready = bool(message.get("driver_ready", False))
                 return
             if message_type == "worker_failed":
                 handle.state = "failed"
                 handle.last_error = str(message.get("error") or "worker startup failed")
+                handle.connection_state = "failed"
+                handle.driver_ready = False
                 self._discard_failed_handle(handle)
                 raise WorkerManagerError(handle.last_error)
 
@@ -274,11 +295,15 @@ class WorkerManager:
         handle.last_error = (
             f"Crawler record timed out: platform={platform}, device_id={handle.device.device_id}, prompt={prompt}"
         )
+        handle.connection_state = "timeout"
+        handle.driver_ready = False
         self.restart_worker(handle.device.device_id)
 
     def _failure_restart(self, handle: WorkerHandle, *, error: str) -> None:
         handle.state = "failed"
         handle.last_error = error
+        handle.connection_state = "failed"
+        handle.driver_ready = False
         self.restart_worker(handle.device.device_id)
 
     def _discard_failed_handle(self, handle: WorkerHandle) -> None:
