@@ -9,6 +9,7 @@ from wuying.application.worker_manager import WorkerManager
 from wuying.config import AppSettings
 
 ProgressCallback = Callable[[dict[str, object]], None]
+CancellationChecker = Callable[[], bool]
 
 
 def resolve_batch_devices(
@@ -32,6 +33,7 @@ def run_batch_job(
     record_timeout_seconds: int,
     batch_timeout_seconds: int | None,
     progress_callback: ProgressCallback | None = None,
+    cancellation_checker: CancellationChecker | None = None,
     worker_manager: WorkerManager | None = None,
 ) -> dict[str, object]:
     owns_manager = worker_manager is None
@@ -47,6 +49,7 @@ def run_batch_job(
             record_timeout_seconds=record_timeout_seconds,
             batch_timeout_seconds=batch_timeout_seconds,
             progress_callback=progress_callback,
+            cancellation_checker=cancellation_checker,
         )
     finally:
         if owns_manager:

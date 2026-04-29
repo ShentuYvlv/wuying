@@ -202,6 +202,23 @@ Invoke-RestMethod `
   -Headers @{ "x-api-key" = "your-crawler-api-key" }
 ```
 
+取消批任务：
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v2/batches/<task_id>/cancel" `
+  -Headers @{ "x-api-key" = "your-crawler-api-key" } `
+  -ContentType "application/json" `
+  -Body (@{ task_id = "<task_id>" } | ConvertTo-Json)
+```
+
+取消语义：
+
+- pending 任务会标记为 `cancelled` 并释放设备预约。
+- running 任务会设置 batch 级取消标记，终止目标设备 worker，停止后续平台、prompt、设备执行。
+- 已完成或已取消任务调用 cancel 是幂等的，不返回 500。
+
 ## 连接稳定性配置
 
 多手机并发时，优先关注下面这组参数：

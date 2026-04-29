@@ -192,6 +192,9 @@ class CrawlerTaskService:
         self.worker_manager = WorkerManager(settings)
         self._task_executor: ThreadPoolExecutor | None = None
         self._futures: set[Future[None]] = set()
+        self._task_futures: dict[str, Future[None]] = {}
+        self._task_device_ids: dict[str, list[str]] = {}
+        self._cancelled_task_ids: set[str] = set()
         self._reserved_device_ids: set[str] = set()
         self._reservation_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -330,6 +333,7 @@ class CrawlerTaskService:
         try:
             self.store.create(task_payload)
             self._submit_execution(
+                task_id,
                 {
                     "task_id": task_id,
                     "batch_request": batch_request,
@@ -342,18 +346,27 @@ class CrawlerTaskService:
             raise
         return task_payload
 
-    def _submit_execution(self, item: dict[str, Any]) -> None:
+    def _submit_execution(self, task_id: str, item: dict[str, Any]) -> None:
         executor = self._task_executor
         if executor is None:
             raise RuntimeError("CrawlerTaskService is not started.")
         future = executor.submit(self._execute_task, item)
         with self._reservation_lock:
             self._futures.add(future)
+            self._task_futures[task_id] = future
+            self._task_device_ids[task_id] = [device.device_id for device in item["devices"]]
         future.add_done_callback(self._forget_future)
 
     def _forget_future(self, future: Future[None]) -> None:
         with self._reservation_lock:
             self._futures.discard(future)
+            finished_task_ids = [
+                task_id for task_id, task_future in self._task_futures.items() if task_future is future
+            ]
+            for task_id in finished_task_ids:
+                self._task_futures.pop(task_id, None)
+                self._task_device_ids.pop(task_id, None)
+                self._cancelled_task_ids.discard(task_id)
 
     def _reserve_devices_or_raise(self, device_ids: list[str], *, owner: str) -> None:
         unique_device_ids = sorted(set(device_ids))
@@ -378,6 +391,65 @@ class CrawlerTaskService:
         with self._reservation_lock:
             for device_id in set(device_ids):
                 self._reserved_device_ids.discard(device_id)
+
+    def cancel_task(self, task_id: str) -> dict[str, Any]:
+        task = self.store.get(task_id)
+        status = str(task.get("status") or "")
+        if status in {"succeeded", "failed", "timeout", "partial_failed", "cancelled"}:
+            return {
+                "task_id": task_id,
+                "status": status,
+                "cancelled": status == "cancelled",
+                "message": f"batch already {status}",
+            }
+
+        device_ids = [str(item) for item in task.get("device_ids", []) if str(item).strip()]
+        with self._reservation_lock:
+            self._cancelled_task_ids.add(task_id)
+            future = self._task_futures.get(task_id)
+        future_cancelled = future.cancel() if future is not None else False
+
+        self.worker_manager.cancel_devices(device_ids, reason=f"cancelled task {task_id}")
+        self._release_reservation(device_ids)
+        if future_cancelled:
+            with self._reservation_lock:
+                self._task_futures.pop(task_id, None)
+                self._task_device_ids.pop(task_id, None)
+                self._cancelled_task_ids.discard(task_id)
+
+        cancelled_at = _utc_now()
+        task = self.store.update(
+            task_id,
+            {
+                "status": "cancelled",
+                "finished_at": cancelled_at,
+                "error": "cancelled by GEO",
+                "current_platform": None,
+                "current_repeat_index": None,
+                "current_prompt_index": None,
+                "current_prompt": None,
+            },
+        )
+        self._upload_progress(
+            task=task,
+            patch={
+                "event_type": "batch_cancelled",
+                "message": "Wuying batch cancelled by GEO",
+                "status": "cancelled",
+                "finished_at": cancelled_at,
+                "error": "cancelled by GEO",
+            },
+        )
+        return {
+            "task_id": task_id,
+            "status": "cancelled",
+            "cancelled": True,
+            "message": "batch cancelled",
+        }
+
+    def _is_task_cancelled(self, task_id: str) -> bool:
+        with self._reservation_lock:
+            return task_id in self._cancelled_task_ids
 
     def _execute_task(self, item: dict[str, Any]) -> None:
         task_id = str(item["task_id"])
@@ -405,6 +477,7 @@ class CrawlerTaskService:
                 record_timeout_seconds=self.record_timeout_seconds,
                 batch_timeout_seconds=self.batch_timeout_seconds,
                 progress_callback=lambda patch: self._handle_progress(task_id, patch),
+                cancellation_checker=lambda: self._is_task_cancelled(task_id),
                 worker_manager=self.worker_manager,
             )
             task = self.store.update(task_id, _without_records(batch_result))
@@ -445,6 +518,7 @@ class CrawlerTaskService:
                     logger.warning("Failed to release task device leases: task_id=%s error=%s", task_id, exc)
             self._release_reservation(device_ids)
 
+        task = self.store.get(task_id)
         callback_info = self._upload_callback(task)
         self.store.update(task_id, {"callback": callback_info})
 
@@ -488,6 +562,9 @@ class CrawlerTaskService:
             return {"status": "failed", "error": str(exc)}
 
     def _upload_callback(self, task: dict[str, Any]) -> dict[str, Any]:
+        if str(task.get("status") or "") == "cancelled":
+            return {"status": "skipped", "reason": "task cancelled"}
+
         env = dict(task.get("env") or {})
         callback_url = _first_non_empty(
             env.get("callback_url"),

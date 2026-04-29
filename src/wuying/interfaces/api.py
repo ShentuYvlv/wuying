@@ -37,6 +37,10 @@ class BatchTaskIn(BaseModel):
     device_ids: list[str] | None = None
 
 
+class BatchCancelIn(BaseModel):
+    task_id: str | None = None
+
+
 class TaskAcceptedOut(BaseModel):
     task_id: str
     trace_id: str
@@ -176,6 +180,22 @@ def create_app() -> FastAPI:
     def get_batch_results(task_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
         try:
             return service.get_results(task_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="task not found") from exc
+
+    @app.post("/api/v2/batches/{task_id}/cancel")
+    def cancel_batch_task(
+        task_id: str,
+        payload: BatchCancelIn | None = None,
+        _: None = Depends(require_api_key),
+    ) -> dict[str, Any]:
+        if payload is not None and payload.task_id and payload.task_id != task_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="payload task_id does not match path task_id",
+            )
+        try:
+            return service.cancel_task(task_id)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="task not found") from exc
 

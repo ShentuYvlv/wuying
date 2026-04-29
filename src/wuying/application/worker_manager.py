@@ -126,6 +126,16 @@ class WorkerManager:
             handle.process.kill()
             handle.process.join(timeout=5)
 
+    def cancel_devices(self, device_ids: list[str], *, reason: str = "cancelled") -> None:
+        unique_device_ids = sorted(set(device_ids))
+        if not unique_device_ids:
+            return
+        max_workers = max(1, len(unique_device_ids))
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="worker-cancel") as executor:
+            futures = [executor.submit(self._cancel_worker, device_id, reason=reason) for device_id in unique_device_ids]
+            for future in as_completed(futures):
+                future.result()
+
     def run_on_device(
         self,
         *,
@@ -191,6 +201,23 @@ class WorkerManager:
         with self._manager_lock:
             handles = list(self._handles.values())
         return [handle.to_dict() for handle in handles]
+
+    def _cancel_worker(self, device_id: str, *, reason: str) -> None:
+        with self._manager_lock:
+            handle = self._handles.pop(device_id, None)
+        if handle is None:
+            return
+
+        handle.state = "cancelled"
+        handle.last_error = reason
+        handle.connection_state = "cancelled"
+        handle.driver_ready = False
+        if handle.process.is_alive():
+            handle.process.terminate()
+            handle.process.join(timeout=2)
+        if handle.process.is_alive():
+            handle.process.kill()
+            handle.process.join(timeout=2)
 
     def _wait_task_result(self, handle: WorkerHandle, *, request_id: str, timeout_seconds: int) -> dict[str, Any]:
         deadline = datetime.now(tz=UTC).timestamp() + timeout_seconds

@@ -18,6 +18,7 @@ from wuying.config import AppSettings
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[dict[str, object]], None]
+CancellationChecker = Callable[[], bool]
 
 
 class BatchDeadline:
@@ -60,6 +61,7 @@ def run_batch_job_with_workers(
     record_timeout_seconds: int,
     batch_timeout_seconds: int | None,
     progress_callback: ProgressCallback | None = None,
+    cancellation_checker: CancellationChecker | None = None,
 ) -> dict[str, object]:
     started_at = _utc_now()
     deadline = BatchDeadline(batch_timeout_seconds)
@@ -93,8 +95,14 @@ def run_batch_job_with_workers(
     failed_batches = 0
     last_error: str | None = None
     stopped_reason: str | None = None
+    cancelled = False
 
     for platform in request.platforms:
+        if _is_cancelled(cancellation_checker):
+            cancelled = True
+            stopped_reason = "cancelled by GEO"
+            last_error = stopped_reason
+            break
         platform_started_at = _utc_now()
         if progress_callback is not None:
             progress_callback(
@@ -108,6 +116,17 @@ def run_batch_job_with_workers(
             )
         for repeat_index in range(1, request.repeat + 1):
             for prompt_index, prompt in enumerate(request.prompts, start=1):
+                if _is_cancelled(cancellation_checker):
+                    cancelled = True
+                    stopped_reason = "cancelled by GEO"
+                    last_error = stopped_reason
+                    logger.info(
+                        "Batch task cancelled before platform=%s repeat_index=%s prompt_index=%s",
+                        platform,
+                        repeat_index,
+                        prompt_index,
+                    )
+                    break
                 if deadline.expired():
                     stopped_reason = (
                         f"{deadline.message()} before "
@@ -151,8 +170,11 @@ def run_batch_job_with_workers(
                     record_timeout_seconds=record_timeout_seconds,
                     deadline=deadline,
                     attempt_index=1,
+                    cancellation_checker=cancellation_checker,
                     progress_callback=progress_callback,
                 )
+                if _is_cancelled(cancellation_checker):
+                    _mark_records_cancelled(device_results)
                 device_results, attempt_results = _backfill_failed_device_results(
                     settings=settings,
                     worker_manager=worker_manager,
@@ -166,8 +188,15 @@ def run_batch_job_with_workers(
                     deadline=deadline,
                     retry_count=failed_record_retry_count,
                     retry_delay_seconds=failed_record_retry_delay_seconds,
+                    cancellation_checker=cancellation_checker,
                     progress_callback=progress_callback,
                 )
+                if _is_cancelled(cancellation_checker):
+                    cancelled = True
+                    stopped_reason = "cancelled by GEO"
+                    last_error = stopped_reason
+                    _mark_records_cancelled(device_results)
+                    _mark_records_cancelled(attempt_results)
                 batch_status = _aggregate_device_status(device_results)
                 finished_batches += 1
                 if batch_status != "succeeded":
@@ -247,6 +276,8 @@ def run_batch_job_with_workers(
                     last_error = stopped_reason
                     logger.warning(stopped_reason)
                     break
+                if cancelled:
+                    break
 
             if stopped_reason is not None:
                 break
@@ -271,6 +302,7 @@ def run_batch_job_with_workers(
         total_batches=finished_batches,
         failed_batches=failed_batches,
         stopped_reason=stopped_reason,
+        cancelled=cancelled,
     )
     prompt_files = _write_prompt_result_files(
         prompt_dir,
@@ -314,6 +346,7 @@ def _run_platform_prompt_on_devices(
     record_timeout_seconds: int,
     deadline: BatchDeadline,
     attempt_index: int,
+    cancellation_checker: CancellationChecker | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> list[DeviceRunRecord]:
     max_workers = max(1, min(len(devices), settings.batch_max_workers))
@@ -361,6 +394,7 @@ def _run_platform_prompt_on_devices(
                 record_timeout_seconds=record_timeout_seconds,
                 deadline=deadline,
                 attempt_index=attempt_index,
+                cancellation_checker=cancellation_checker,
             ): device
             for device in devices
         }
@@ -399,6 +433,7 @@ def _backfill_failed_device_results(
     deadline: BatchDeadline,
     retry_count: int,
     retry_delay_seconds: float,
+    cancellation_checker: CancellationChecker | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[DeviceRunRecord], list[DeviceRunRecord]]:
     attempt_results = list(initial_results)
@@ -410,6 +445,8 @@ def _backfill_failed_device_results(
     previous_failures: dict[str, list[dict[str, object]]] = {}
 
     for attempt in range(1, retry_count + 1):
+        if _is_cancelled(cancellation_checker):
+            break
         if deadline.expired():
             break
         failed_results = [
@@ -479,6 +516,7 @@ def _backfill_failed_device_results(
             record_timeout_seconds=record_timeout_seconds,
             deadline=deadline,
             attempt_index=attempt + 1,
+            cancellation_checker=cancellation_checker,
             progress_callback=progress_callback,
         )
         attempt_results.extend(retry_results)
@@ -520,6 +558,24 @@ def _needs_failed_record_backfill(record: DeviceRunRecord) -> bool:
         return True
     response = str(record.result.get("response") or "").strip()
     return not response
+
+
+def _is_cancelled(cancellation_checker: CancellationChecker | None) -> bool:
+    if cancellation_checker is None:
+        return False
+    try:
+        return bool(cancellation_checker())
+    except Exception as exc:
+        logger.warning("Cancellation checker failed and will be ignored: %s", exc)
+        return False
+
+
+def _mark_records_cancelled(records: list[DeviceRunRecord]) -> None:
+    for record in records:
+        if record.status == "succeeded":
+            continue
+        record.status = "cancelled"
+        record.error = "cancelled by GEO"
 
 
 def _attach_backfill_metadata(
@@ -572,8 +628,25 @@ def _run_device(
     record_timeout_seconds: int,
     deadline: BatchDeadline,
     attempt_index: int,
+    cancellation_checker: CancellationChecker | None = None,
 ) -> DeviceRunRecord:
     started_at = _utc_now()
+    if _is_cancelled(cancellation_checker):
+        finished_at = _utc_now()
+        return DeviceRunRecord(
+            device_id=device.device_id,
+            instance_id=device.instance_id,
+            adb_endpoint=device.adb_endpoint,
+            platform=platform,
+            prompt=prompt,
+            prompt_index=prompt_index,
+            repeat_index=repeat_index,
+            status="cancelled",
+            started_at=started_at,
+            finished_at=finished_at,
+            attempt_index=attempt_index,
+            error="cancelled by GEO",
+        )
     timeout_seconds = deadline.record_timeout(record_timeout_seconds)
     if timeout_seconds <= 0:
         finished_at = _utc_now()
@@ -670,13 +743,15 @@ def _run_device(
         )
     except Exception as exc:
         finished_at = _utc_now()
+        status = "cancelled" if _is_cancelled(cancellation_checker) else "failed"
+        error = "cancelled by GEO" if status == "cancelled" else str(exc)
         logger.warning(
             "Device run failed: platform=%s device=%s repeat=%s prompt_index=%s error=%s",
             platform,
             device.device_id,
             repeat_index,
             prompt_index,
-            exc,
+            error,
         )
         return DeviceRunRecord(
             device_id=device.device_id,
@@ -686,11 +761,11 @@ def _run_device(
             prompt=prompt,
             prompt_index=prompt_index,
             repeat_index=repeat_index,
-            status="failed",
+            status=status,
             started_at=started_at,
             finished_at=finished_at,
             attempt_index=attempt_index,
-            error=str(exc),
+            error=error,
         )
 
 
@@ -1072,6 +1147,8 @@ def _result_integrity_error(result: dict[str, object]) -> str | None:
 def _aggregate_device_status(device_results: list[DeviceRunRecord]) -> str:
     if not device_results:
         return "failed"
+    if all(item.status == "cancelled" for item in device_results):
+        return "cancelled"
     success_count = sum(1 for item in device_results if item.status == "succeeded")
     if success_count == len(device_results):
         return "succeeded"
@@ -1085,7 +1162,10 @@ def _aggregate_overall_status(
     total_batches: int,
     failed_batches: int,
     stopped_reason: str | None,
+    cancelled: bool = False,
 ) -> str:
+    if cancelled:
+        return "cancelled"
     if total_batches == 0:
         return "timeout" if stopped_reason else "failed"
     if stopped_reason and failed_batches:

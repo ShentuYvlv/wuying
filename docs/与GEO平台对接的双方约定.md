@@ -809,3 +809,219 @@ PIPELINE_LLM_MODEL=doubao-seed-1-6-lite-251015
 6. 默认 `CRAWLER_FAILED_RECORD_RETRY_COUNT=0`，失败、超时、空响应不会被静默重跑；如显式启用回补，每次 attempt 都会保存到 `raw/*.json`。
 7. `raw/*.json` 文件名包含 attempt 序号，例如 `_a001/_a002`；`prompts/*.json` 只聚合每台设备最终 attempt。
 8. worker 状态中的 `idle` 只表示 worker 进程空闲，是否已完成 driver 初始化应看 `driver_ready` / `ready_for_task`。
+
+## 追加修改：停止执行与 Wuying 队列取消
+
+更新时间：2026-04-29
+
+### 背景
+
+GEO 后台已经新增 Wuying 停止执行能力：
+
+1. 任务管理页面可以停止正在排队、已提交、执行中的 Wuying 后台任务。
+2. 售前诊断页面可以停止正在排队、已提交、执行中的 Wuying 诊断任务。
+3. 后台新增 `Wuying 队列` 菜单，可以统一查看后台任务和售前诊断的 Wuying 队列，并支持置顶、上调、下调、取消。
+
+但 GEO 只能管理自己的本地队列状态。对于已经提交到 Wuying 的 batch，真正停止手机执行、释放设备、终止 worker，必须由 Wuying 提供 cancel 接口并在 Wuying 进程内处理。
+
+### GEO 已实现的调用约定
+
+GEO 新增配置：
+
+```env
+WUYING_BATCH_CANCEL_URL={WUYING_CRAWLER_BASE_URL}/api/v2/batches/{task_id}/cancel
+WUYING_BATCH_CANCEL_TIMEOUT_SECONDS=15
+```
+
+当 GEO 取消 Wuying run 时：
+
+1. 如果 run 还只是 GEO 本地 `queued`，没有 `crawler_task_id`：
+   - GEO 只在本地标记 `cancelled`
+   - 不调用 Wuying
+2. 如果 run 已经 `submitted` 或 `running`，并且有 `crawler_task_id`：
+   - GEO 调用：
+
+```text
+POST /api/v2/batches/{task_id}/cancel
+```
+
+请求头：
+
+```text
+x-api-key: {SCRAPER_API_KEY}
+Content-Type: application/json
+```
+
+请求体：
+
+```json
+{
+  "task_id": "wuying-20260429071208-c656077b"
+}
+```
+
+3. 只有 Wuying cancel 返回 `2xx` 时，GEO 才会：
+   - 标记 run 为 `cancelled`
+   - 写入取消日志
+   - 本地释放 Wuying 全局资源锁
+   - 忽略之后可能迟到的 progress/upload callback
+4. 如果 Wuying cancel 返回非 `2xx` 或请求失败：
+   - GEO 不会本地标记取消成功
+   - GEO 不会释放 Wuying 全局资源锁
+   - 前端提示取消失败
+   - 目的是避免 Wuying 实际仍在操作手机时，GEO 又启动下一个手机任务
+
+### Wuying 必须新增的接口
+
+Wuying 需要实现：
+
+```text
+POST /api/v2/batches/{task_id}/cancel
+```
+
+鉴权方式和现有 batch 接口一致：
+
+```text
+x-api-key: {SCRAPER_API_KEY}
+```
+
+请求体可以为空，也可以接收：
+
+```json
+{
+  "task_id": "wuying-20260429071208-c656077b"
+}
+```
+
+Wuying 返回示例：
+
+```json
+{
+  "task_id": "wuying-20260429071208-c656077b",
+  "status": "cancelled",
+  "cancelled": true,
+  "message": "batch cancelled"
+}
+```
+
+### Wuying cancel 语义
+
+Wuying 收到 cancel 后必须做到：
+
+1. 如果 batch 还在 pending/排队：
+   - 从 Wuying 内部待执行队列移除
+   - 状态改为 `cancelled`
+   - 不再执行设备任务
+2. 如果 batch 正在 running：
+   - 设置 batch 级取消标记
+   - 正在等待的后续平台、prompt、设备任务不再启动
+   - 已经启动的设备任务应尽快中断或在当前安全点退出
+   - 释放设备租约
+   - 状态改为 `cancelled` 或 `cancelling -> cancelled`
+3. 如果 batch 已经 succeeded/failed/timeout/cancelled：
+   - cancel 接口应幂等
+   - 可以返回 `200 OK`
+   - 返回当前最终状态，不应报 500
+4. 如果 `task_id` 不存在：
+   - 返回 `404 Not Found`
+5. 如果 API Key 不正确：
+   - 返回 `401 Unauthorized`
+
+### Wuying 状态接口需要同步支持 cancelled
+
+`GET /api/v2/batches/{task_id}` 返回的 `status` 需要支持：
+
+```text
+cancelled
+```
+
+建议返回：
+
+```json
+{
+  "task_id": "wuying-20260429071208-c656077b",
+  "status": "cancelled",
+  "finished_batches": 1,
+  "failed_batches": 0,
+  "expected_batches": 5,
+  "error": "cancelled by GEO"
+}
+```
+
+`GET /api/v2/batches/{task_id}/results` 对 cancelled 的处理：
+
+1. 如果已有部分 raw/prompts 结果，可以正常返回已有结果。
+2. 如果没有任何结果，返回空 records，不要 500。
+3. `status` 返回 `cancelled`。
+
+### progress 推送约定
+
+Wuying 收到 cancel 后建议向 GEO progress 接口推送一次取消事件：
+
+```text
+POST /api/integrations/crawler/progress
+```
+
+请求体：
+
+```json
+{
+  "run_id": "GEO传入的env.run_id",
+  "task_id": "GEO任务ID",
+  "crawler_task_id": "wuying-20260429071208-c656077b",
+  "trace_id": "wuying-20260429071208-c656077b",
+  "event_type": "batch_cancelled",
+  "status": "cancelled",
+  "message": "Wuying batch cancelled by GEO"
+}
+```
+
+注意：GEO 当前已经会忽略本地状态为 `cancelled` 的迟到 progress/upload，因此 Wuying 即使在取消后仍有旧进度到达，也不会把 GEO 状态改回执行中。
+
+### callback 约定
+
+取消后的 callback 规则：
+
+1. 如果取消时没有生成可审核业务结果：
+   - Wuying 不需要 callback upload
+2. 如果取消时已经生成了部分结果：
+   - 默认不建议再 callback 到审核队列，避免用户以为这是完整结果
+   - 如确实要回传部分结果，必须在 payload 顶层或 record 中明确：
+
+```json
+{
+  "status": "cancelled",
+  "partial": true,
+  "cancelled": true
+}
+```
+
+GEO 当前主要按 run 状态处理：本地已取消的 run 收到 upload 会被忽略。
+
+### 双方最终责任边界
+
+GEO 负责：
+
+1. 展示停止按钮。
+2. 管理本地 Wuying 队列。
+3. 对本地 queued 任务直接取消。
+4. 对 submitted/running 任务调用 Wuying cancel。
+5. Wuying cancel 成功后本地标记 cancelled 并释放 GEO 侧锁。
+6. Wuying cancel 失败时保留当前状态和锁，避免误启动下一个任务。
+
+Wuying 负责：
+
+1. 实现 `POST /api/v2/batches/{task_id}/cancel`。
+2. 维护 batch 的 cancelled 状态。
+3. 停止未开始的后续平台、prompt、设备执行。
+4. 尽快中断或安全退出已启动设备任务。
+5. 释放 Wuying 内部设备租约。
+6. status/results 接口正确返回 cancelled 状态。
+7. cancel 接口幂等，已完成或已取消任务不应报 500。
+
+### 一句话约定
+
+停止执行不是 GEO 单方面能完成的能力：
+
+- GEO 负责发起取消、更新本地队列和锁。
+- Wuying 必须负责真正停止 batch、释放设备、返回 cancelled 状态。
