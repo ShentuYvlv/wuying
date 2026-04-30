@@ -1025,3 +1025,114 @@ Wuying 负责：
 
 - GEO 负责发起取消、更新本地队列和锁。
 - Wuying 必须负责真正停止 batch、释放设备、返回 cancelled 状态。
+
+## 追加修改：售前诊断回调与正式监控任务回调分离
+
+更新时间：2026-04-30
+
+### 背景
+
+售前诊断调用 Wuying 执行后，结果只是给售前诊断页面查看和生成统计，不进入 GEO 正式监控任务的审核队列。
+
+之前售前诊断仍把 `callback_url` 传成：
+
+```text
+/api/integrations/crawler/uploads
+```
+
+这个入口是正式监控任务入口，会要求 `user_id/product_id/keyword_id/monitor_date` 等任务字段齐全，并会把结果写入审核队列。售前诊断回传不应该走这个入口，否则会出现 `400 Bad Request`。
+
+### GEO 已调整
+
+GEO 售前诊断提交 Wuying batch 时，`env` 中会传入：
+
+```json
+{
+  "source_type": "presales_diagnostic",
+  "business_id": "GEO售前诊断ID",
+  "diagnostic_id": "GEO售前诊断ID",
+  "input_id": "GEO售前输入行ID",
+  "run_id": "GEO售前诊断run_id",
+  "task_id": "GEO售前诊断run_id",
+  "callback_url": "http://geo-watcher-backend:3005/api/integrations/presales/uploads",
+  "callback_api_key": "xxx",
+  "progress_url": "http://geo-watcher-backend:3005/api/integrations/presales/progress",
+  "progress_api_key": "xxx"
+}
+```
+
+说明：
+
+1. `callback_url` 从 `CRAWLER_CALLBACK_URL` 的同一 host 自动推导，不需要新增 `PRESALES_CALLBACK_URL`。
+2. `progress_url` 同理自动推导，不需要新增 `PRESALES_PROGRESS_URL`。
+3. 售前诊断结果不会进入 `crawler_upload_reviews` 审核队列。
+4. GEO 仍兼容旧入口：如果 Wuying 误发到 `/api/integrations/crawler/uploads`，只要能通过 `run_id/crawler_task_id/trace_id` 识别为售前诊断，也会分流到售前诊断处理。但这只是兜底，不是推荐做法。
+
+### Wuying 必须配合
+
+Wuying 对售前诊断 batch 必须严格使用 GEO 请求 `env` 中的地址：
+
+1. 上传最终结果时使用：
+
+```text
+POST {env.callback_url}
+```
+
+也就是：
+
+```text
+POST /api/integrations/presales/uploads
+```
+
+2. 推送执行进度时使用：
+
+```text
+POST {env.progress_url}
+```
+
+也就是：
+
+```text
+POST /api/integrations/presales/progress
+```
+
+3. 不要把售前诊断结果强制发到全局 `CRAWLER_CALLBACK_URL` 或 `/api/integrations/crawler/uploads`。
+4. multipart form 建议字段：
+
+```text
+run_id={env.run_id}
+source_type=presales_diagnostic
+diagnostic_id={env.diagnostic_id}
+input_id={env.input_id}
+files=<json files>
+```
+
+5. 请求头：
+
+```text
+x-api-key: {env.callback_api_key}
+```
+
+6. 如果 Wuying 内部只能拿到自己的 `task_id`，GEO 也会尝试用 `crawler_task_id/trace_id` 查找售前 run；但标准做法仍然是回传 `run_id={env.run_id}`。
+
+### 正式监控任务与售前诊断的区别
+
+| 场景 | callback_url | progress_url | GEO处理 |
+| --- | --- | --- | --- |
+| 正式监控任务 | `/api/integrations/crawler/uploads` | `/api/integrations/crawler/progress` | 进入审核队列，审核通过后写指标 |
+| 售前诊断 | `/api/integrations/presales/uploads` | `/api/integrations/presales/progress` | 写入售前诊断 run，只给诊断页面/统计使用 |
+
+### 排错规则
+
+如果售前诊断执行完成后 Wuying 日志出现：
+
+```text
+POST http://geo-watcher-backend:3005/api/integrations/crawler/uploads HTTP/1.1 400 Bad Request
+```
+
+说明 Wuying 仍在把售前诊断发到正式监控任务入口，需要检查：
+
+1. 是否读取并使用了 `env.callback_url`。
+2. 是否错误使用了全局 `CRAWLER_CALLBACK_URL`。
+3. multipart form 是否带了 `source_type=presales_diagnostic`。
+4. `run_id` 是否优先使用 `env.run_id`。

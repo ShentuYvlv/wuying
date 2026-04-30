@@ -566,16 +566,20 @@ class CrawlerTaskService:
             return {"status": "skipped", "reason": "task cancelled"}
 
         env = dict(task.get("env") or {})
-        callback_url = _first_non_empty(
-            env.get("callback_url"),
-            env.get("callbackUrl"),
-            os.getenv("CRAWLER_CALLBACK_URL"),
-        )
-        callback_api_key = _first_non_empty(
-            env.get("callback_api_key"),
-            env.get("callbackApiKey"),
-            os.getenv("CRAWLER_CALLBACK_API_KEY"),
-        )
+        if _is_presales_task(task):
+            callback_url = _first_non_empty(env.get("callback_url"), env.get("callbackUrl"))
+            callback_api_key = _first_non_empty(env.get("callback_api_key"), env.get("callbackApiKey"))
+        else:
+            callback_url = _first_non_empty(
+                env.get("callback_url"),
+                env.get("callbackUrl"),
+                os.getenv("CRAWLER_CALLBACK_URL"),
+            )
+            callback_api_key = _first_non_empty(
+                env.get("callback_api_key"),
+                env.get("callbackApiKey"),
+                os.getenv("CRAWLER_CALLBACK_API_KEY"),
+            )
         if not callback_url:
             return {"status": "skipped", "reason": "missing callback_url"}
         if not callback_api_key:
@@ -595,6 +599,12 @@ class CrawlerTaskService:
         form_data = {
             "run_id": _first_non_empty(env.get("run_id"), task["task_id"]),
             "task_id": _first_non_empty(env.get("task_id"), task["task_id"]),
+            "crawler_task_id": _first_non_empty(task.get("task_id")),
+            "trace_id": _first_non_empty(task.get("trace_id"), task.get("task_id")),
+            "source_type": _first_non_empty(env.get("source_type"), env.get("sourceType")),
+            "business_id": _first_non_empty(env.get("business_id"), env.get("businessId")),
+            "diagnostic_id": _first_non_empty(env.get("diagnostic_id"), env.get("diagnosticId")),
+            "input_id": _first_non_empty(env.get("input_id"), env.get("inputId")),
             "user_id": _first_non_empty(env.get("user_id")),
             "platform_id": _first_non_empty(
                 env.get("platform_id"),
@@ -652,6 +662,14 @@ def _build_task_id() -> str:
 
 def _resolve_progress_url(task: dict[str, Any]) -> str | None:
     env = dict(task.get("env") or {})
+    if _is_presales_task(task):
+        return _first_non_empty(
+            env.get("progress_url"),
+            env.get("progressUrl"),
+            env.get("callback_progress_url"),
+            env.get("callbackProgressUrl"),
+        )
+
     explicit = _first_non_empty(
         env.get("progress_url"),
         env.get("progressUrl"),
@@ -676,6 +694,13 @@ def _resolve_progress_url(task: dict[str, Any]) -> str | None:
 
 def _resolve_progress_api_key(task: dict[str, Any]) -> str | None:
     env = dict(task.get("env") or {})
+    if _is_presales_task(task):
+        return _first_non_empty(
+            env.get("progress_api_key"),
+            env.get("progressApiKey"),
+            env.get("callback_api_key"),
+            env.get("callbackApiKey"),
+        )
     return _first_non_empty(
         env.get("progress_api_key"),
         env.get("progressApiKey"),
@@ -699,6 +724,10 @@ def _build_progress_payload(*, task: dict[str, Any], patch: dict[str, Any]) -> d
         "task_id": _first_non_empty(env.get("task_id"), task.get("task_id")),
         "crawler_task_id": task.get("task_id"),
         "trace_id": task.get("trace_id") or task.get("task_id"),
+        "source_type": _first_non_empty(env.get("source_type"), env.get("sourceType")),
+        "business_id": _first_non_empty(env.get("business_id"), env.get("businessId")),
+        "diagnostic_id": _first_non_empty(env.get("diagnostic_id"), env.get("diagnosticId")),
+        "input_id": _first_non_empty(env.get("input_id"), env.get("inputId")),
         "event_type": patch.get("event_type") or "progress",
         "message": patch.get("message") or "",
         "status": patch.get("status") or task.get("status"),
@@ -786,6 +815,12 @@ def _first_non_empty(*values: object) -> str | None:
             if stripped:
                 return stripped
     return None
+
+
+def _is_presales_task(task: dict[str, Any]) -> bool:
+    env = dict(task.get("env") or {})
+    source_type = _first_non_empty(env.get("source_type"), env.get("sourceType"))
+    return source_type == "presales_diagnostic"
 
 
 def _build_callback_files(
