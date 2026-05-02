@@ -688,7 +688,14 @@ rank
 - `前三率`
 - `置顶率`
 
-`负面提及率` 和 `attitude` 当前可以继续由 Wuying 写入占位值或后续补充算法。
+如果 GEO 传入 `is_negative=true`，Wuying 会按负面任务口径计算：
+
+- `提及率`：目标品牌被正常识别、正常提及且没有混淆的比例
+- `负面提及率`：任一负面词被语义判定为“用于评价目标品牌本身”的比例
+- `前三率 / 置顶率`：负面任务不适用，写为 `null`
+- `attitude`：当前仍写为 `null`
+
+负面词来自请求 `env.negative_words / env.negativeWords / env.metric_negative_words / env.metricNegativeWords / env.negative_keywords / env.negativeKeywords`，也可由服务端环境变量 `PIPELINE_NEGATIVE_WORDS / METRIC_NEGATIVE_WORDS` 提供。支持 JSON 数组或逗号/换行分隔字符串。
 
 ### Wuying 读取优先级
 
@@ -712,7 +719,9 @@ Wuying 当前读取指标关键词的优先级如下：
 {
   "env": {
     "metric_keyword": "诺崔特",
-    "metric_detect_type": "rank"
+    "metric_detect_type": "rank",
+    "is_negative": "false",
+    "negative_words": ["难吃", "变质", "不新鲜", "口感差", "溢价高"]
   }
 }
 ```

@@ -18,6 +18,7 @@ data/debug_wuying*.xml
 .runtime/
 platform-tools/api_*_dump.xml
 
+外部脚本/
 a_Scraping_ChatGPT_Web_main/memory
 # Sensitive runtime session/auth files
 a_Scraping_ChatGPT_Web_main/doubao-playwright/auth.json

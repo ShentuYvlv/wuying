@@ -103,6 +103,7 @@ CRAWLER_FAILED_RECORD_RETRY_DELAY_SECONDS=2
 PIPELINE_LLM_API_KEY=your-llm-api-key
 PIPELINE_METRIC_KEYWORD=你的品牌名
 PIPELINE_METRIC_DETECT_TYPE=rank
+PIPELINE_NEGATIVE_WORDS=难吃,变质,不新鲜,口感差,溢价高
 WUYING_MANUAL_ADB_ENDPOINT=106.14.114.146:100
 WUYING_INSTANCE_IDS=acp-xxxxxxxxxxxxxxxx
 WUYING_REGION_ID=cn-shanghai
@@ -342,10 +343,20 @@ CRAWLER_PLATFORM_ENDPOINTS={"wuying-doubao":"http://wuying-crawler:8000/api/v1/t
   - `PIPELINE_LLM_API_KEY`
   - `PIPELINE_METRIC_KEYWORD`
   - `PIPELINE_METRIC_DETECT_TYPE`
+  - `PIPELINE_NEGATIVE_WORDS`
 - 也可以在单次任务请求的 `env` 里传：
   - `metric_keyword`
   - `metric_detect_type`
   - `metric_api_key`
+  - `is_negative`
+  - `negative_words`
+
+负面任务说明：
+
+- GEO 传 `env.is_negative=true` 时，Wuying 会启用负面语义指标。
+- `提及率` 表示目标品牌正常识别/正常提及比例。
+- `负面提及率` 表示任一负面词被语义判定为评价目标品牌本身的比例。
+- 每个负面词的命中数和命中率会写入 `prompts/*.json` 的 `metric_summary.negative_word_stats`。
 
 回调地址：
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
@@ -904,11 +905,16 @@ def _apply_prompt_metrics(
     metrics_runtime: dict[str, object] | None,
     output_path: Path,
 ) -> dict[str, object]:
-    metrics = _calculate_prompt_metrics(
+    metrics_payload = _calculate_prompt_metrics(
         prompt_records,
         metrics_runtime=metrics_runtime,
         output_path=output_path,
     )
+    metrics = {
+        key: metrics_payload.get(key)
+        for key in _default_prompt_metrics()
+    }
+    metric_summary = metrics_payload.get("metric_summary")
     clean_records = [_without_prompt_metrics(record) for record in prompt_records]
     platform = str(prompt_records[0].get("platform") or "") if prompt_records else ""
     prompt = str(prompt_records[0].get("prompt") or prompt_records[0].get("query") or "") if prompt_records else ""
@@ -930,6 +936,7 @@ def _apply_prompt_metrics(
         "record_count": len(clean_records),
         "records": clean_records,
         **metrics,
+        **({"metric_summary": metric_summary} if metric_summary else {}),
     }
 
 
@@ -937,6 +944,7 @@ def _without_prompt_metrics(record: dict[str, object]) -> dict[str, object]:
     clean_record = dict(record)
     for key in _default_prompt_metrics():
         clean_record.pop(key, None)
+    clean_record.pop("metric_summary", None)
     return clean_record
 
 
@@ -961,13 +969,17 @@ def _calculate_prompt_metrics(
         metrics = summary.get("metrics")
         if not isinstance(metrics, dict):
             return default_metrics
-        return {
+        payload: dict[str, object] = {
             "提及率": metrics.get("提及率"),
             "前三率": metrics.get("前三率"),
             "置顶率": metrics.get("置顶率"),
             "负面提及率": metrics.get("负面提及率"),
             "attitude": metrics.get("attitude"),
         }
+        metric_summary = _build_metric_summary(summary)
+        if metric_summary:
+            payload["metric_summary"] = metric_summary
+        return payload
     except Exception as exc:
         logger.warning("Prompt metrics calculation failed: path=%s error=%s", output_path, exc)
         return default_metrics
@@ -981,6 +993,23 @@ def _default_prompt_metrics() -> dict[str, object]:
         "负面提及率": None,
         "attitude": None,
     }
+
+
+def _build_metric_summary(summary: object) -> dict[str, object] | None:
+    if not isinstance(summary, dict):
+        return None
+    allowed_keys = {
+        "input_file",
+        "keyword",
+        "detect_type",
+        "negative_words",
+        "record_count",
+        "brand",
+        "negative_word_stats",
+        "details",
+    }
+    compact = {key: summary[key] for key in allowed_keys if key in summary}
+    return compact or None
 
 
 def _create_prompt_metrics_runtime(task_env: dict[str, Any]) -> dict[str, object] | None:
@@ -1003,7 +1032,7 @@ def _create_prompt_metrics_runtime(task_env: dict[str, Any]) -> dict[str, object
         logger.info("Prompt metrics analyzer is disabled because metric keyword is not configured.")
         return None
 
-    detect_type = (
+    raw_detect_type = (
         _first_non_empty(
             task_env.get("metric_detect_type"),
             task_env.get("metricDetectType"),
@@ -1013,6 +1042,17 @@ def _create_prompt_metrics_runtime(task_env: dict[str, Any]) -> dict[str, object
         )
         or "rank"
     ).strip().lower()
+    detect_type = "negative" if _is_negative_metric_task(task_env) else raw_detect_type
+    negative_words = _parse_negative_words(
+        task_env.get("negative_words"),
+        task_env.get("negativeWords"),
+        task_env.get("metric_negative_words"),
+        task_env.get("metricNegativeWords"),
+        task_env.get("negative_keywords"),
+        task_env.get("negativeKeywords"),
+        os.getenv("PIPELINE_NEGATIVE_WORDS"),
+        os.getenv("METRIC_NEGATIVE_WORDS"),
+    )
 
     try:
         from wuying.application.prompt_metrics import PromptMetricsAnalyzer
@@ -1037,6 +1077,7 @@ def _create_prompt_metrics_runtime(task_env: dict[str, Any]) -> dict[str, object
                 os.getenv("PIPELINE_LLM_MODEL"),
             )
             or "doubao-seed-1-6-lite-251015",
+            negative_words=negative_words,
         )
     except Exception as exc:
         logger.warning("Prompt metrics analyzer init failed: keyword=%s detect_type=%s error=%s", keyword, detect_type, exc)
@@ -1066,6 +1107,50 @@ def _normalize_metric_keyword(value: str | None) -> str | None:
     if len(keyword) >= 2 and keyword[0] == keyword[-1] and keyword[0] in {'"', "'"}:
         keyword = keyword[1:-1].strip()
     return keyword or None
+
+
+def _is_negative_metric_task(task_env: dict[str, Any]) -> bool:
+    raw = _first_non_empty_config_value(
+        task_env.get("is_negative"),
+        task_env.get("isNegative"),
+        task_env.get("negative"),
+        task_env.get("metric_is_negative"),
+        task_env.get("metricIsNegative"),
+    )
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on", "negative", "负面"}
+
+
+def _parse_negative_words(*values: object) -> list[str]:
+    for value in values:
+        parsed = _parse_negative_words_value(value)
+        if parsed:
+            return parsed
+    return []
+
+
+def _parse_negative_words_value(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if not isinstance(value, str):
+        return []
+    raw = value.strip()
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, list):
+        return [str(item).strip() for item in payload if str(item).strip()]
+    return [
+        item.strip()
+        for item in re.split(r"[,，;；\n]+", raw)
+        if item.strip()
+    ]
 
 
 def _prompt_result_filename(*, file_stamp: str, platform: str, prompt_index: int, prompt: str) -> str:
