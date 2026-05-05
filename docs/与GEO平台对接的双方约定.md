@@ -682,6 +682,14 @@ POST /api/v2/batches
 rank
 ```
 
+`task_type`：
+
+GEO 平台传入的任务类型。Wuying 需要根据该字段切换任务口径：
+
+- `normal_monitor`：正常监控任务，按常规提及率、前三率、置顶率口径处理。
+- `brand_mention`：品牌提及任务，按品牌提及任务口径处理，前端布局与正常监控任务一致。
+- `negative_mention`：负面提及任务，需要结合负面词计算负面提及率。
+
 `rank` 会计算：
 
 - `提及率`
@@ -718,9 +726,10 @@ Wuying 当前读取指标关键词的优先级如下：
 ```json
 {
   "env": {
+    "task_type": "negative_mention",
     "metric_keyword": "诺崔特",
     "metric_detect_type": "rank",
-    "is_negative": "false",
+    "is_negative": "true",
     "negative_words": ["难吃", "变质", "不新鲜", "口感差", "溢价高"]
   }
 }

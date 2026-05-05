@@ -58,6 +58,7 @@ class PromptMetricsAnalyzer:
         base_url: str | None = None,
         model: str = "doubao-seed-1-6-lite-251015",
         negative_words: list[str] | None = None,
+        task_type: str = "normal_monitor",
     ) -> None:
         normalized_keyword = _normalize_keyword(keyword)
         if not normalized_keyword:
@@ -65,6 +66,7 @@ class PromptMetricsAnalyzer:
         if not api_key:
             raise ValueError("api_key is required for PromptMetricsAnalyzer")
         self.keyword = normalized_keyword
+        self.task_type = (task_type or "normal_monitor").strip().lower() or "normal_monitor"
         self.detect_type = detect_type.strip().lower() or "rank"
         self.negative_words = _normalize_negative_words(negative_words)
         self.model = model
@@ -86,6 +88,7 @@ class PromptMetricsAnalyzer:
             return {
                 "input_file": input_file,
                 "keyword": self.keyword,
+                "task_type": self.task_type,
                 "record_count": 0,
                 "metrics": {
                     "提及率": 0.0,
@@ -128,6 +131,7 @@ class PromptMetricsAnalyzer:
         return {
             "input_file": input_file,
             "keyword": self.keyword,
+            "task_type": self.task_type,
             "record_count": total_count,
             "metrics": {
                 "提及率": round(mention_count / total_count * 100, 2),
@@ -208,6 +212,7 @@ class PromptMetricsAnalyzer:
         return {
             "input_file": input_file,
             "keyword": self.keyword,
+            "task_type": self.task_type,
             "detect_type": self.detect_type,
             "negative_words": self.negative_words,
             "record_count": total_count,

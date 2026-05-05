@@ -1001,6 +1001,7 @@ def _build_metric_summary(summary: object) -> dict[str, object] | None:
     allowed_keys = {
         "input_file",
         "keyword",
+        "task_type",
         "detect_type",
         "negative_words",
         "record_count",
@@ -1032,6 +1033,14 @@ def _create_prompt_metrics_runtime(task_env: dict[str, Any]) -> dict[str, object
         logger.info("Prompt metrics analyzer is disabled because metric keyword is not configured.")
         return None
 
+    task_type = _normalize_task_type(
+        _first_non_empty(
+            task_env.get("task_type"),
+            task_env.get("taskType"),
+            task_env.get("metric_task_type"),
+            task_env.get("metricTaskType"),
+        )
+    )
     raw_detect_type = (
         _first_non_empty(
             task_env.get("metric_detect_type"),
@@ -1042,7 +1051,7 @@ def _create_prompt_metrics_runtime(task_env: dict[str, Any]) -> dict[str, object
         )
         or "rank"
     ).strip().lower()
-    detect_type = "negative" if _is_negative_metric_task(task_env) else raw_detect_type
+    detect_type = "negative" if _is_negative_metric_task(task_env, task_type=task_type) else raw_detect_type
     negative_words = _parse_negative_words(
         task_env.get("negative_words"),
         task_env.get("negativeWords"),
@@ -1078,6 +1087,7 @@ def _create_prompt_metrics_runtime(task_env: dict[str, Any]) -> dict[str, object
             )
             or "doubao-seed-1-6-lite-251015",
             negative_words=negative_words,
+            task_type=task_type,
         )
     except Exception as exc:
         logger.warning("Prompt metrics analyzer init failed: keyword=%s detect_type=%s error=%s", keyword, detect_type, exc)
@@ -1086,6 +1096,7 @@ def _create_prompt_metrics_runtime(task_env: dict[str, Any]) -> dict[str, object
     logger.info("Prompt metrics analyzer enabled: keyword=%s detect_type=%s", keyword, detect_type)
     return {
         "keyword": keyword,
+        "task_type": task_type,
         "detect_type": detect_type,
         "analyzer": analyzer,
     }
@@ -1109,7 +1120,13 @@ def _normalize_metric_keyword(value: str | None) -> str | None:
     return keyword or None
 
 
-def _is_negative_metric_task(task_env: dict[str, Any]) -> bool:
+def _normalize_task_type(value: str | None) -> str:
+    return (value or "normal_monitor").strip().lower() or "normal_monitor"
+
+
+def _is_negative_metric_task(task_env: dict[str, Any], *, task_type: str | None = None) -> bool:
+    if _normalize_task_type(task_type) == "negative_mention":
+        return True
     raw = _first_non_empty_config_value(
         task_env.get("is_negative"),
         task_env.get("isNegative"),
