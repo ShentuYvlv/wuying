@@ -85,23 +85,12 @@ class PromptMetricsAnalyzer:
             and str(record.get("response") or "").strip()
         ]
         if not valid_records:
-            return {
-                "input_file": input_file,
-                "keyword": self.keyword,
-                "task_type": self.task_type,
-                "record_count": 0,
-                "metrics": {
-                    "提及率": 0.0,
-                    "前三率": 0.0,
-                    "置顶率": 0.0,
-                    "负面提及率": None,
-                    "attitude": None,
-                },
-                "details": [],
-            }
+            return self._build_empty_result(input_file=input_file)
 
         if self.detect_type in {"negative", "negative_word", "negative_words", "brand_negative"}:
             return self._analyze_negative_records(valid_records, input_file=input_file)
+        if self.task_type == "brand_mention":
+            return self._analyze_brand_mention_records(valid_records, input_file=input_file)
 
         mention_count = 0
         top3_count = 0
@@ -139,6 +128,100 @@ class PromptMetricsAnalyzer:
                 "置顶率": round(top1_count / total_count * 100, 2),
                 "负面提及率": None,
                 "attitude": None,
+            },
+            "details": details,
+        }
+
+    def _build_empty_result(self, *, input_file: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "input_file": input_file,
+            "keyword": self.keyword,
+            "task_type": self.task_type,
+            "record_count": 0,
+            "metrics": {
+                "提及率": 0.0,
+                "前三率": 0.0,
+                "置顶率": 0.0,
+                "负面提及率": None,
+                "attitude": None,
+            },
+            "details": [],
+        }
+        if self.task_type == "brand_mention":
+            payload["detect_type"] = "brand_mention"
+            payload["metrics"]["前三率"] = None
+            payload["metrics"]["置顶率"] = None
+            payload["brand"] = {
+                "normal_count": 0,
+                "normal_rate": 0.0,
+                "abnormal_count": 0,
+                "abnormal_rate": 0.0,
+            }
+        elif self.detect_type in {"negative", "negative_word", "negative_words", "brand_negative"}:
+            payload["detect_type"] = self.detect_type
+            payload["negative_words"] = self.negative_words
+            payload["metrics"]["前三率"] = None
+            payload["metrics"]["置顶率"] = None
+            payload["brand"] = {
+                "normal_count": 0,
+                "normal_rate": 0.0,
+                "abnormal_count": 0,
+                "abnormal_rate": 0.0,
+            }
+            payload["negative_word_stats"] = {
+                word: {"hit_count": 0, "hit_rate": 0.0} for word in self.negative_words
+            }
+        return payload
+
+    def _analyze_brand_mention_records(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        input_file: str,
+    ) -> dict[str, Any]:
+        total_count = len(records)
+        brand_normal_count = 0
+        brand_abnormal_count = 0
+        details: list[dict[str, Any]] = []
+
+        for record in records:
+            query = str(record.get("query") or record.get("prompt") or "")
+            response = str(record.get("response") or "")
+            detection = self._judge_brand_unified(query=query, response=response)
+            brand_normal = bool(detection.get("brand_normal"))
+            if brand_normal:
+                brand_normal_count += 1
+            else:
+                brand_abnormal_count += 1
+            details.append(
+                {
+                    "device_id": record.get("device_id"),
+                    "brand_normal": brand_normal,
+                    "analysis_desc": detection.get("analysis_desc") or "",
+                    "abnormal_detail": detection.get("abnormal_detail") or "",
+                }
+            )
+
+        normal_rate = round(brand_normal_count / total_count * 100, 2)
+        abnormal_rate = round(brand_abnormal_count / total_count * 100, 2)
+        return {
+            "input_file": input_file,
+            "keyword": self.keyword,
+            "task_type": self.task_type,
+            "detect_type": "brand_mention",
+            "record_count": total_count,
+            "metrics": {
+                "提及率": normal_rate,
+                "前三率": None,
+                "置顶率": None,
+                "负面提及率": None,
+                "attitude": None,
+            },
+            "brand": {
+                "normal_count": brand_normal_count,
+                "normal_rate": normal_rate,
+                "abnormal_count": brand_abnormal_count,
+                "abnormal_rate": abnormal_rate,
             },
             "details": details,
         }
@@ -370,6 +453,12 @@ def main() -> int:
     parser.add_argument("--base-url", default="https://ark.cn-beijing.volces.com/api/v3")
     parser.add_argument("--model", default="doubao-seed-1-6-lite-251015")
     parser.add_argument("--detect-type", default="rank", choices=["rank", "negative"])
+    parser.add_argument(
+        "--task-type",
+        default="normal_monitor",
+        choices=["normal_monitor", "brand_mention", "negative_mention"],
+        help="Metric task mode. brand_mention uses semantic brand recognition instead of rank.",
+    )
     parser.add_argument("--negative-words", default="", help="Comma-separated negative words for negative tasks")
     args = parser.parse_args()
 
@@ -384,6 +473,7 @@ def main() -> int:
             for item in re.split(r"[,，;；\n]+", args.negative_words)
             if item.strip()
         ],
+        task_type=args.task_type,
     )
 
     target = Path(args.path)
