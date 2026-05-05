@@ -684,15 +684,25 @@ def _run_device(
             save_result=False,
         )
         integrity_error = _result_integrity_error(result)
+        reference_warning = _reference_collection_warning(result)
         finished_at = _utc_now()
         if integrity_error:
             logger.warning(
-                "Device run completed with incomplete result: platform=%s device=%s repeat=%s prompt_index=%s error=%s",
+                "Device run failed integrity check: platform=%s device=%s repeat=%s prompt_index=%s error=%s",
                 platform,
                 device.device_id,
                 repeat_index,
                 prompt_index,
                 integrity_error,
+            )
+        elif reference_warning:
+            logger.warning(
+                "Device run succeeded with incomplete references: platform=%s device=%s repeat=%s prompt_index=%s warning=%s",
+                platform,
+                device.device_id,
+                repeat_index,
+                prompt_index,
+                reference_warning,
             )
         else:
             logger.info(
@@ -1223,7 +1233,10 @@ def _result_integrity_error(result: dict[str, object]) -> str | None:
     response = str(result.get("response") or "").strip()
     if not response:
         return "response empty"
+    return None
 
+
+def _reference_collection_warning(result: dict[str, object]) -> str | None:
     platform_extra = result.get("platform_extra")
     if not isinstance(platform_extra, dict):
         return None

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -190,8 +191,12 @@ class CrawlerTaskService:
             stale_after_seconds=settings.device.device_lease_ttl_seconds,
         )
         self.worker_manager = WorkerManager(settings)
+        self.callback_timeout_seconds = _get_env_int("CRAWLER_CALLBACK_TIMEOUT_SECONDS", 10)
+        self.callback_max_workers = _get_env_int("CRAWLER_CALLBACK_MAX_WORKERS", 2)
         self._task_executor: ThreadPoolExecutor | None = None
+        self._callback_executor: ThreadPoolExecutor | None = None
         self._futures: set[Future[None]] = set()
+        self._callback_futures: set[Future[None]] = set()
         self._task_futures: dict[str, Future[None]] = {}
         self._task_device_ids: dict[str, list[str]] = {}
         self._cancelled_task_ids: set[str] = set()
@@ -208,13 +213,21 @@ class CrawlerTaskService:
             max_workers=max(1, self.settings.batch_max_workers),
             thread_name_prefix="wuying-task",
         )
+        self._callback_executor = ThreadPoolExecutor(
+            max_workers=max(1, self.callback_max_workers),
+            thread_name_prefix="wuying-callback",
+        )
 
     def stop(self) -> None:
         self._stop_event.set()
         executor = self._task_executor
+        callback_executor = self._callback_executor
         self._task_executor = None
+        self._callback_executor = None
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+        if callback_executor is not None:
+            callback_executor.shutdown(wait=False, cancel_futures=True)
         self.worker_manager.stop_all()
 
     def submit(self, request: CrawlerTaskRequest) -> dict[str, Any]:
@@ -518,9 +531,7 @@ class CrawlerTaskService:
                     logger.warning("Failed to release task device leases: task_id=%s error=%s", task_id, exc)
             self._release_reservation(device_ids)
 
-        task = self.store.get(task_id)
-        callback_info = self._upload_callback(task)
-        self.store.update(task_id, {"callback": callback_info})
+        self._schedule_callback_upload(task_id)
 
     def _handle_progress(self, task_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         store_patch = _progress_store_patch(patch)
@@ -560,6 +571,39 @@ class CrawlerTaskService:
                 exc,
             )
             return {"status": "failed", "error": str(exc)}
+
+    def _schedule_callback_upload(self, task_id: str) -> None:
+        try:
+            self.store.update(task_id, {"callback": {"status": "uploading"}})
+        except Exception as exc:
+            logger.warning("Failed to mark callback as uploading: task_id=%s error=%s", task_id, exc)
+
+        executor = self._callback_executor
+        if executor is None:
+            callback_info = self._upload_callback(self.store.get(task_id))
+            self.store.update(task_id, {"callback": callback_info})
+            return
+
+        future = executor.submit(self._execute_callback_upload, task_id)
+        with self._reservation_lock:
+            self._callback_futures.add(future)
+        future.add_done_callback(self._forget_callback_future)
+
+    def _execute_callback_upload(self, task_id: str) -> None:
+        try:
+            task = self.store.get(task_id)
+            callback_info = self._upload_callback(task)
+            self.store.update(task_id, {"callback": callback_info})
+        except Exception as exc:
+            logger.warning("Callback upload worker failed: task_id=%s error=%s", task_id, exc)
+            try:
+                self.store.update(task_id, {"callback": {"status": "failed", "error": str(exc)}})
+            except Exception:
+                logger.debug("Failed to persist callback worker failure: task_id=%s", task_id, exc_info=True)
+
+    def _forget_callback_future(self, future: Future[None]) -> None:
+        with self._reservation_lock:
+            self._callback_futures.discard(future)
 
     def _upload_callback(self, task: dict[str, Any]) -> dict[str, Any]:
         if str(task.get("status") or "") == "cancelled":
@@ -618,7 +662,7 @@ class CrawlerTaskService:
         form_data = {key: value for key, value in form_data.items() if value}
 
         try:
-            with httpx.Client(timeout=60.0, trust_env=False) as client:
+            with httpx.Client(timeout=max(1, self.callback_timeout_seconds), trust_env=False) as client:
                 response = client.post(
                     callback_url,
                     headers={"x-api-key": callback_api_key},
