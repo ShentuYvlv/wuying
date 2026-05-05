@@ -191,7 +191,7 @@ class CrawlerTaskService:
             stale_after_seconds=settings.device.device_lease_ttl_seconds,
         )
         self.worker_manager = WorkerManager(settings)
-        self.callback_timeout_seconds = _get_env_int("CRAWLER_CALLBACK_TIMEOUT_SECONDS", 10)
+        self.callback_timeout_seconds = _get_env_int("CRAWLER_CALLBACK_TIMEOUT_SECONDS", 300)
         self.callback_max_workers = _get_env_int("CRAWLER_CALLBACK_MAX_WORKERS", 2)
         self._task_executor: ThreadPoolExecutor | None = None
         self._callback_executor: ThreadPoolExecutor | None = None
@@ -343,6 +343,15 @@ class CrawlerTaskService:
             "started_at": None,
             "finished_at": None,
         }
+        logger.info(
+            "Batch task accepted: task_id=%s platforms=%s prompts=%s repeat=%s devices=%s expected_batches=%s",
+            task_id,
+            ",".join(batch_request.platforms),
+            len(batch_request.prompts),
+            batch_request.repeat,
+            ",".join(device_ids),
+            task_payload["expected_batches"],
+        )
         try:
             self.store.create(task_payload)
             self._submit_execution(
@@ -482,13 +491,21 @@ class CrawlerTaskService:
                     "started_at": started_at,
                 },
             )
+            record_timeout_seconds = _resolve_record_timeout_seconds(
+                batch_request.env,
+                default=self.record_timeout_seconds,
+            )
+            batch_timeout_seconds = _resolve_batch_timeout_seconds(
+                batch_request.env,
+                default=self.batch_timeout_seconds,
+            )
             batch_result = run_batch_job(
                 settings=self.settings,
                 task_id=task_id,
                 request=batch_request,
                 devices=devices,
-                record_timeout_seconds=self.record_timeout_seconds,
-                batch_timeout_seconds=self.batch_timeout_seconds,
+                record_timeout_seconds=record_timeout_seconds,
+                batch_timeout_seconds=batch_timeout_seconds,
                 progress_callback=lambda patch: self._handle_progress(task_id, patch),
                 cancellation_checker=lambda: self._is_task_cancelled(task_id),
                 worker_manager=self.worker_manager,
@@ -662,7 +679,11 @@ class CrawlerTaskService:
         form_data = {key: value for key, value in form_data.items() if value}
 
         try:
-            with httpx.Client(timeout=max(1, self.callback_timeout_seconds), trust_env=False) as client:
+            callback_timeout_seconds = _resolve_callback_timeout_seconds(
+                env,
+                default=self.callback_timeout_seconds,
+            )
+            with httpx.Client(timeout=max(1, callback_timeout_seconds), trust_env=False) as client:
                 response = client.post(
                     callback_url,
                     headers={"x-api-key": callback_api_key},
@@ -953,6 +974,61 @@ def _get_env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ValueError(f"Environment variable {name} must be an integer, got {raw!r}") from exc
+
+
+def _resolve_record_timeout_seconds(env: dict[str, Any], *, default: int) -> int:
+    return _get_payload_int(
+        env,
+        "record_timeout_seconds",
+        "recordTimeoutSeconds",
+        "record_timeout",
+        "recordTimeout",
+        "timeout_seconds",
+        "timeoutSeconds",
+        "timeout",
+        default=default,
+    )
+
+
+def _resolve_batch_timeout_seconds(env: dict[str, Any], *, default: int) -> int:
+    return _get_payload_int(
+        env,
+        "batch_timeout_seconds",
+        "batchTimeoutSeconds",
+        "batch_timeout",
+        "batchTimeout",
+        default=default,
+    )
+
+
+def _resolve_callback_timeout_seconds(env: dict[str, Any], *, default: int) -> int:
+    return _get_payload_int(
+        env,
+        "callback_timeout_seconds",
+        "callbackTimeoutSeconds",
+        "callback_timeout",
+        "callbackTimeout",
+        default=default,
+    )
+
+
+def _get_payload_int(env: dict[str, Any], *names: str, default: int) -> int:
+    for name in names:
+        if name not in env:
+            continue
+        raw = env.get(name)
+        if raw is None:
+            continue
+        if isinstance(raw, str) and not raw.strip():
+            continue
+        try:
+            value = int(str(raw).strip())
+        except ValueError as exc:
+            raise ValueError(f"Task env field {name} must be an integer, got {raw!r}") from exc
+        if value <= 0:
+            raise ValueError(f"Task env field {name} must be greater than 0, got {value!r}")
+        return value
+    return default
 
 
 def _utc_now() -> str:

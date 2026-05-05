@@ -92,6 +92,8 @@ $env:ADB_VENDOR_KEYS="E:\all code\C一念\wuying\platform-tools\adbkey"
 SCRAPER_API_KEY=your-crawler-api-key
 CRAWLER_CALLBACK_URL=http://geo-watcher-backend:3005/api/integrations/crawler/uploads
 CRAWLER_CALLBACK_API_KEY=your-callback-api-key
+CRAWLER_CALLBACK_TIMEOUT_SECONDS=300
+CRAWLER_CALLBACK_MAX_WORKERS=2
 # 可不填；默认由 uploads 地址推导到 /api/integrations/crawler/progress
 CRAWLER_PROGRESS_URL=http://geo-watcher-backend:3005/api/integrations/crawler/progress
 CRAWLER_PROGRESS_API_KEY=your-callback-api-key
@@ -270,6 +272,7 @@ Invoke-RestMethod `
 - `POST /api/v1/tasks/{platform_id}` 是异步入队，只表示任务已接收。
 - 单条 prompt 的硬超时由 `CRAWLER_RECORD_TIMEOUT_SECONDS` 控制，默认 `300` 秒。
 - 整个批任务的总超时由 `CRAWLER_BATCH_TIMEOUT_SECONDS` 控制，默认 `3600` 秒。
+- 如果总超时小于 `平台数 × prompt 数 × repeat × 单条超时`，Wuying 会自动扩到最低执行预算，避免多平台任务共用一个过短倒计时。
 - 单次平台 + prompt 的设备并发上限由 `CRAWLER_BATCH_MAX_WORKERS` 控制，默认 `5`。
 - 单条设备结果失败、超时或空响应后，只有显式设置 `CRAWLER_FAILED_RECORD_RETRY_COUNT>0` 才会回补重跑，默认 `0` 次，避免监控采样被静默修正。
 - 如果启用回补，每次 attempt 都会保存到 `raw/*.json`，文件名包含 `_a001/_a002`；最终业务文件只使用每台设备最后一次 attempt。

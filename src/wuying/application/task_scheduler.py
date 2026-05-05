@@ -65,7 +65,6 @@ def run_batch_job_with_workers(
     cancellation_checker: CancellationChecker | None = None,
 ) -> dict[str, object]:
     started_at = _utc_now()
-    deadline = BatchDeadline(batch_timeout_seconds)
 
     task_root_dir = _task_root_dir(settings, task_id)
     raw_dir = task_root_dir / "raw"
@@ -78,6 +77,24 @@ def run_batch_job_with_workers(
     metrics_runtime = _create_prompt_metrics_runtime(request.env)
     failed_record_retry_count = _get_failed_record_retry_count(request.env)
     failed_record_retry_delay_seconds = _get_failed_record_retry_delay_seconds(request.env)
+    effective_batch_timeout_seconds = _effective_batch_timeout_seconds(
+        configured_timeout_seconds=batch_timeout_seconds,
+        request=request,
+        record_timeout_seconds=record_timeout_seconds,
+        failed_record_retry_count=failed_record_retry_count,
+        failed_record_retry_delay_seconds=failed_record_retry_delay_seconds,
+    )
+    deadline = BatchDeadline(effective_batch_timeout_seconds)
+    logger.info(
+        "Batch timeout plan: task=%s platforms=%s prompts=%s repeat=%s record_timeout=%ss configured_batch_timeout=%s effective_batch_timeout=%s",
+        task_id,
+        len(request.platforms),
+        len(request.prompts),
+        request.repeat,
+        record_timeout_seconds,
+        batch_timeout_seconds,
+        effective_batch_timeout_seconds,
+    )
     if progress_callback is not None:
         progress_callback(
             {
@@ -1223,6 +1240,40 @@ def _write_json_atomic(path: Path, payload: object) -> None:
 def _safe_filename_part(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value.strip())
     return cleaned or "unknown"
+
+
+def _effective_batch_timeout_seconds(
+    *,
+    configured_timeout_seconds: int | None,
+    request: BatchTaskRequest,
+    record_timeout_seconds: int,
+    failed_record_retry_count: int,
+    failed_record_retry_delay_seconds: float,
+) -> int | None:
+    if configured_timeout_seconds is None or configured_timeout_seconds <= 0:
+        return None
+
+    sequential_units = max(1, len(request.platforms) * len(request.prompts) * request.repeat)
+    attempts_per_unit = 1 + max(0, failed_record_retry_count)
+    minimum_seconds = sequential_units * attempts_per_unit * max(1, record_timeout_seconds)
+    if failed_record_retry_count > 0 and failed_record_retry_delay_seconds > 0:
+        minimum_seconds += int(sequential_units * failed_record_retry_count * failed_record_retry_delay_seconds)
+
+    if configured_timeout_seconds >= minimum_seconds:
+        return configured_timeout_seconds
+
+    logger.warning(
+        "Configured batch timeout is lower than the per-record execution budget; expanding batch timeout: "
+        "configured=%ss minimum=%ss platforms=%s prompts=%s repeat=%s attempts_per_unit=%s record_timeout=%ss",
+        configured_timeout_seconds,
+        minimum_seconds,
+        len(request.platforms),
+        len(request.prompts),
+        request.repeat,
+        attempts_per_unit,
+        record_timeout_seconds,
+    )
+    return minimum_seconds
 
 
 def _empty_references() -> dict[str, object]:
