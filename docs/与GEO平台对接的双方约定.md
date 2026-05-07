@@ -823,7 +823,7 @@ PIPELINE_LLM_MODEL=doubao-seed-1-6-lite-251015
 2. 同一台设备同一时刻仍只能被一个任务预约或租用；如果目标设备已预约或已租用，提交时返回 `409 Conflict`。
 3. 设备租约只在任务执行线程开始时落盘，避免任务长时间 pending 时制造“设备正在执行”的假象。
 4. `CRAWLER_BATCH_MAX_WORKERS` 控制同一平台 + prompt 下的设备并发上限。
-5. `CRAWLER_BATCH_TIMEOUT_SECONDS` 会参与单设备执行和失败回补的剩余时间计算，不再只在 prompt 开始前检查。
+5. `CRAWLER_BATCH_TIMEOUT_SECONDS` 会参与单设备执行和失败回补的剩余时间计算，不再只在 prompt 开始前检查；如果配置值小于 `平台数 × prompt 数 × repeat × 单条超时`，Wuying 会自动扩到最低执行预算，避免多平台任务共用一个过短倒计时。
 6. 默认 `CRAWLER_FAILED_RECORD_RETRY_COUNT=0`，失败、超时、空响应不会被静默重跑；如显式启用回补，每次 attempt 都会保存到 `raw/*.json`。
 7. `raw/*.json` 文件名包含 attempt 序号，例如 `_a001/_a002`；`prompts/*.json` 只聚合每台设备最终 attempt。
 8. worker 状态中的 `idle` 只表示 worker 进程空闲，是否已完成 driver 初始化应看 `driver_ready` / `ready_for_task`。
