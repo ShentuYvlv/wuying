@@ -657,25 +657,36 @@ class CrawlerTaskService:
         if not callback_files:
             return {"status": "skipped", "reason": "no callback files"}
 
-        form_data = {
-            "run_id": _first_non_empty(env.get("run_id"), task["task_id"]),
-            "task_id": _first_non_empty(env.get("task_id"), task["task_id"]),
-            "crawler_task_id": _first_non_empty(task.get("task_id")),
-            "trace_id": _first_non_empty(task.get("trace_id"), task.get("task_id")),
-            "source_type": _first_non_empty(env.get("source_type"), env.get("sourceType")),
-            "business_id": _first_non_empty(env.get("business_id"), env.get("businessId")),
-            "diagnostic_id": _first_non_empty(env.get("diagnostic_id"), env.get("diagnosticId")),
-            "input_id": _first_non_empty(env.get("input_id"), env.get("inputId")),
-            "user_id": _first_non_empty(env.get("user_id")),
-            "platform_id": _first_non_empty(
-                env.get("platform_id"),
-                task_records[0].get("platform_id"),
-            ),
-            "product_id": _first_non_empty(env.get("product_id")),
-            "keyword_id": _first_non_empty(env.get("keyword_id")),
-            "monitor_date": _first_non_empty(env.get("monitor_date")),
-            "file_count": str(len(callback_files)),
-        }
+        if _is_presales_task(task):
+            form_data = {
+                "run_id": _first_non_empty(env.get("run_id"), task["task_id"]),
+                "source_type": _first_non_empty(env.get("source_type"), env.get("sourceType")),
+                "diagnostic_id": _first_non_empty(env.get("diagnostic_id"), env.get("diagnosticId")),
+                "input_id": _first_non_empty(env.get("input_id"), env.get("inputId")),
+                "crawler_task_id": _first_non_empty(task.get("task_id")),
+                "trace_id": _first_non_empty(task.get("trace_id"), task.get("task_id")),
+                "file_count": str(len(callback_files)),
+            }
+        else:
+            form_data = {
+                "run_id": _first_non_empty(env.get("run_id"), task["task_id"]),
+                "task_id": _first_non_empty(env.get("task_id"), task["task_id"]),
+                "crawler_task_id": _first_non_empty(task.get("task_id")),
+                "trace_id": _first_non_empty(task.get("trace_id"), task.get("task_id")),
+                "source_type": _first_non_empty(env.get("source_type"), env.get("sourceType")),
+                "business_id": _first_non_empty(env.get("business_id"), env.get("businessId")),
+                "diagnostic_id": _first_non_empty(env.get("diagnostic_id"), env.get("diagnosticId")),
+                "input_id": _first_non_empty(env.get("input_id"), env.get("inputId")),
+                "user_id": _first_non_empty(env.get("user_id")),
+                "platform_id": _first_non_empty(
+                    env.get("platform_id"),
+                    task_records[0].get("platform_id"),
+                ),
+                "product_id": _first_non_empty(env.get("product_id")),
+                "keyword_id": _first_non_empty(env.get("keyword_id")),
+                "monitor_date": _first_non_empty(env.get("monitor_date")),
+                "file_count": str(len(callback_files)),
+            }
         form_data = {key: value for key, value in form_data.items() if value}
 
         try:
@@ -702,12 +713,16 @@ class CrawlerTaskService:
                 "record_count": callback_record_count,
             }
         except Exception as exc:
+            response_text = ""
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+                response_text = exc.response.text.strip()
             logger.warning("Callback upload failed: task_id=%s error=%s", task["task_id"], exc)
             return {
                 "status": "failed",
                 "records_path": task.get("records_path"),
                 "prompt_files": task.get("prompt_files", []),
                 "error": str(exc),
+                "response_text": response_text or None,
                 "file_count": len(callback_files),
                 "record_count": callback_record_count,
             }
